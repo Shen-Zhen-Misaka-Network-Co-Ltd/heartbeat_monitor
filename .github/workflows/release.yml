@@ -1,12 +1,9 @@
-name: Build Flutter
+name: Release
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
-  pull_request:
-    branches: [main]
 
 jobs:
   check:
@@ -28,7 +25,6 @@ jobs:
       - run: flutter test
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: ubuntu-latest
     defaults:
