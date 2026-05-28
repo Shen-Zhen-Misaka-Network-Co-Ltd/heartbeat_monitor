@@ -367,12 +367,13 @@
         const maxBpm = Math.min(240, Math.max(...bpms) + 4);
         const minT = Math.min(...samples.map((s) => s.t_ms));
         const maxT = Math.max(...samples.map((s) => s.t_ms));
+        const displaySamples = smoothSamplesForChart(samples, state.windowSeconds);
         const x = (t) => pad + ((t - minT) / Math.max(1, maxT - minT)) * (w - pad * 2);
         const y = (bpm) => pad + (1 - (bpm - minBpm) / Math.max(1, maxBpm - minBpm)) * (h - pad * 2);
         yAxis.innerHTML = `<span>${maxBpm}</span><span>${Math.round((maxBpm + minBpm) / 2)}</span><span>${minBpm}</span>`;
         xAxis.textContent = timeLabel(minT);
         ctx.beginPath();
-        samples.forEach((s, i) => i ? ctx.lineTo(x(s.t_ms), y(s.bpm)) : ctx.moveTo(x(s.t_ms), y(s.bpm)));
+        displaySamples.forEach((s, i) => i ? ctx.lineTo(x(s.t_ms), y(s.bpm)) : ctx.moveTo(x(s.t_ms), y(s.bpm)));
         ctx.strokeStyle = "#168bff";
         ctx.lineWidth = 3;
         ctx.lineJoin = "round";
@@ -393,6 +394,31 @@
         holder.onmousemove = (e) => showTip(e.clientX);
         holder.ontouchmove = (e) => { if (e.touches[0]) showTip(e.touches[0].clientX); };
         holder.onmouseleave = () => { tooltip.style.display = "none"; };
+      }
+      function smoothSamplesForChart(samples, windowSeconds) {
+        if (samples.length <= 180 || windowSeconds <= 3600) return samples;
+        const bucketMs = windowSeconds >= 21600 ? 120000 : 30000;
+        const out = [];
+        let bucketStart = null, timeSum = 0, bpmSum = 0, count = 0;
+        const flush = () => {
+          if (!count) return;
+          out.push({ t_ms: Math.round(timeSum / count), bpm: Math.round(bpmSum / count) });
+          timeSum = 0; bpmSum = 0; count = 0;
+        };
+        for (const sample of samples) {
+          if (bucketStart == null || sample.t_ms >= bucketStart + bucketMs) {
+            flush();
+            bucketStart = sample.t_ms;
+          }
+          timeSum += sample.t_ms;
+          bpmSum += sample.bpm;
+          count += 1;
+        }
+        flush();
+        const first = samples[0], last = samples[samples.length - 1];
+        if (out[0]?.t_ms !== first.t_ms) out.unshift(first);
+        if (out[out.length - 1]?.t_ms !== last.t_ms) out.push(last);
+        return out;
       }
       document.getElementById("refresh").onclick = () => loadLobby();
       loadLobby(text.connecting).catch(() => { heroSub.textContent = text.polling; });

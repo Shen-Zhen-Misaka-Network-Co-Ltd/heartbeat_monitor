@@ -703,6 +703,7 @@ private fun HeartRateSeriesCard(
                     .fillMaxWidth()
                     .aspectRatio(3.2f),
                 samples = sortedSamples,
+                displaySamples = smoothSamplesForChart(sortedSamples, seriesWindowSeconds),
                 bounds = bounds,
             )
             Row(
@@ -785,6 +786,7 @@ private fun StatusTagButton(
 private fun HeartRateChart(
     modifier: Modifier,
     samples: List<SeriesSample>,
+    displaySamples: List<SeriesSample>,
     bounds: ChartBounds,
 ) {
     var focusedSample by remember(samples) { mutableStateOf<SeriesSample?>(null) }
@@ -855,7 +857,7 @@ private fun HeartRateChart(
                 val verticalPadding = 14f
                 val chartWidth = size.width - horizontalPadding * 2
                 val chartHeight = size.height - verticalPadding * 2
-                val points = samples.map { sample ->
+                val points = displaySamples.map { sample ->
                     val x = horizontalPadding + ((sample.tMs - bounds.minTimeMs).toFloat() / timeSpan) * chartWidth
                     val y = verticalPadding + (1f - ((sample.bpm - bounds.minBpm).toFloat() / bpmSpan)) * chartHeight
                     Offset(x, y)
@@ -891,7 +893,8 @@ private fun HeartRateChart(
                     color = HyperBlue,
                     style = Stroke(width = 3.5f, cap = StrokeCap.Round),
                 )
-                points.takeLast(24).forEach { point ->
+                val markerPoints = if (displaySamples.size <= MAX_MARKER_POINTS) points else emptyList()
+                markerPoints.forEach { point ->
                     drawCircle(color = HyperBlue.copy(alpha = 0.2f), radius = 5.5f, center = point)
                     drawCircle(color = HyperBlue, radius = 2.7f, center = point)
                 }
@@ -933,6 +936,49 @@ private fun HeartRateChart(
             )
         }
     }
+}
+
+private fun smoothSamplesForChart(samples: List<SeriesSample>, windowSeconds: Long): List<SeriesSample> {
+    if (samples.size <= MAX_DIRECT_CHART_POINTS || windowSeconds <= 60 * 60) return samples
+
+    val bucketMs = when {
+        windowSeconds >= 6 * 60 * 60 -> 2 * 60 * 1000L
+        windowSeconds >= 60 * 60 -> 30 * 1000L
+        else -> 10 * 1000L
+    }
+    val smoothed = mutableListOf<SeriesSample>()
+    var bucketStart = Long.MIN_VALUE
+    var weightedTimeSum = 0L
+    var bpmSum = 0
+    var count = 0
+
+    fun flushBucket() {
+        if (count == 0) return
+        smoothed += SeriesSample(
+            tMs = weightedTimeSum / count,
+            bpm = (bpmSum.toFloat() / count).toInt(),
+        )
+        weightedTimeSum = 0L
+        bpmSum = 0
+        count = 0
+    }
+
+    samples.forEach { sample ->
+        if (bucketStart == Long.MIN_VALUE || sample.tMs >= bucketStart + bucketMs) {
+            flushBucket()
+            bucketStart = sample.tMs
+        }
+        weightedTimeSum += sample.tMs
+        bpmSum += sample.bpm
+        count += 1
+    }
+    flushBucket()
+
+    val first = samples.first()
+    val last = samples.last()
+    if (smoothed.firstOrNull()?.tMs != first.tMs) smoothed.add(0, first)
+    if (smoothed.lastOrNull()?.tMs != last.tMs) smoothed += last
+    return smoothed
 }
 
 private data class SeriesWindowOption(
@@ -1107,5 +1153,8 @@ private fun chooseParticipantColumns(
         }.thenByDescending { columns -> columns },
     )
 }
+
+private const val MAX_DIRECT_CHART_POINTS = 180
+private const val MAX_MARKER_POINTS = 36
 
 private val HyperBlue = Color(0xFF0A84FF)
