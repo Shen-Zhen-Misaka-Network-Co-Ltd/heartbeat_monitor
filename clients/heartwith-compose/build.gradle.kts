@@ -56,7 +56,7 @@ kotlin {
 
 extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") {
     namespace = "com.heartwith.app"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.heartwith.app"
