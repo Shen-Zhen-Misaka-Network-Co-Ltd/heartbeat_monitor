@@ -58,8 +58,8 @@ private external fun browserLanguage(): String
 fun main() {
     ComposeViewport(viewportContainerId = "ComposeTarget") {
         val webFont by preloadFont(heartwithCjkFont)
-        val loadedFont = webFont ?: return@ComposeViewport
-        HeartwithTheme(fontFamily = FontFamily(loadedFont)) {
+        val fontFamily = webFont?.let { FontFamily(it) } ?: FontFamily.Default
+        HeartwithTheme(fontFamily = fontFamily) {
             val api = remember { HeartwithApi("") }
             val scope = rememberCoroutineScope()
             val json = remember { Json { ignoreUnknownKeys = true } }
