@@ -29,10 +29,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -789,7 +791,9 @@ private fun HeartRateChart(
     displaySamples: List<SeriesSample>,
     bounds: ChartBounds,
 ) {
-    var focusedSample by remember(samples) { mutableStateOf<SeriesSample?>(null) }
+    val boundedSamples = samples.filter { it.tMs in bounds.minTimeMs..bounds.maxTimeMs }
+    val boundedDisplaySamples = displaySamples.filter { it.tMs in bounds.minTimeMs..bounds.maxTimeMs }
+    var focusedSample by remember(boundedSamples) { mutableStateOf<SeriesSample?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
             modifier = modifier,
@@ -810,7 +814,8 @@ private fun HeartRateChart(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .pointerInput(samples, bounds) {
+                    .clip(RoundedCornerShape(8.dp))
+                    .pointerInput(boundedSamples, bounds) {
                         awaitPointerEventScope {
                             while (true) {
                                 val event = awaitPointerEvent()
@@ -818,7 +823,7 @@ private fun HeartRateChart(
                                 focusedSample = nearestSampleForX(
                                     x = position.x,
                                     width = size.width.toFloat(),
-                                    samples = samples,
+                                    samples = boundedSamples,
                                     bounds = bounds,
                                 )
                             }
@@ -840,7 +845,7 @@ private fun HeartRateChart(
                         strokeWidth = 1f,
                     )
                 }
-                if (samples.size < 2) {
+                if (boundedSamples.size < 2) {
                     drawLine(
                         color = mutedLineColor,
                         start = Offset(0f, size.height * 0.62f),
@@ -857,11 +862,15 @@ private fun HeartRateChart(
                 val verticalPadding = 14f
                 val chartWidth = size.width - horizontalPadding * 2
                 val chartHeight = size.height - verticalPadding * 2
-                val points = displaySamples.map { sample ->
+                val points = boundedDisplaySamples.map { sample ->
                     val x = horizontalPadding + ((sample.tMs - bounds.minTimeMs).toFloat() / timeSpan) * chartWidth
                     val y = verticalPadding + (1f - ((sample.bpm - bounds.minBpm).toFloat() / bpmSpan)) * chartHeight
-                    Offset(x, y)
+                    Offset(
+                        x.coerceIn(horizontalPadding, horizontalPadding + chartWidth),
+                        y.coerceIn(verticalPadding, verticalPadding + chartHeight),
+                    )
                 }
+                if (points.size < 2) return@Canvas
 
                 val path = Path().apply {
                     moveTo(points.first().x, points.first().y)
@@ -887,28 +896,41 @@ private fun HeartRateChart(
                     lineTo(points.first().x, size.height - verticalPadding)
                     close()
                 }
-                drawPath(fillPath, HyperBlue.copy(alpha = 0.11f))
-                drawPath(
-                    path = path,
-                    color = HyperBlue,
-                    style = Stroke(width = 3.5f, cap = StrokeCap.Round),
-                )
-                val markerPoints = if (displaySamples.size <= MAX_MARKER_POINTS) points else emptyList()
-                markerPoints.forEach { point ->
-                    drawCircle(color = HyperBlue.copy(alpha = 0.2f), radius = 5.5f, center = point)
-                    drawCircle(color = HyperBlue, radius = 2.7f, center = point)
-                }
-                focusedSample?.let { sample ->
-                    val x = horizontalPadding + ((sample.tMs - bounds.minTimeMs).toFloat() / timeSpan) * chartWidth
-                    val y = verticalPadding + (1f - ((sample.bpm - bounds.minBpm).toFloat() / bpmSpan)) * chartHeight
-                    drawLine(
-                        color = HyperBlue.copy(alpha = 0.45f),
-                        start = Offset(x, verticalPadding),
-                        end = Offset(x, size.height - verticalPadding),
-                        strokeWidth = 1.4f,
+                clipRect(
+                    left = 0f,
+                    top = 0f,
+                    right = size.width,
+                    bottom = size.height,
+                ) {
+                    drawPath(fillPath, HyperBlue.copy(alpha = 0.11f))
+                    drawPath(
+                        path = path,
+                        color = HyperBlue,
+                        style = Stroke(width = 3.5f, cap = StrokeCap.Round),
                     )
-                    drawCircle(color = Color.White.copy(alpha = 0.86f), radius = 6.2f, center = Offset(x, y))
-                    drawCircle(color = HyperBlue, radius = 4.1f, center = Offset(x, y))
+                    val markerPoints = if (boundedDisplaySamples.size <= MAX_MARKER_POINTS) points else emptyList()
+                    markerPoints.forEach { point ->
+                        drawCircle(color = HyperBlue.copy(alpha = 0.2f), radius = 5.5f, center = point)
+                        drawCircle(color = HyperBlue, radius = 2.7f, center = point)
+                    }
+                    focusedSample?.let { sample ->
+                        val x = (
+                            horizontalPadding +
+                                ((sample.tMs - bounds.minTimeMs).toFloat() / timeSpan) * chartWidth
+                            ).coerceIn(horizontalPadding, horizontalPadding + chartWidth)
+                        val y = (
+                            verticalPadding +
+                                (1f - ((sample.bpm - bounds.minBpm).toFloat() / bpmSpan)) * chartHeight
+                            ).coerceIn(verticalPadding, verticalPadding + chartHeight)
+                        drawLine(
+                            color = HyperBlue.copy(alpha = 0.45f),
+                            start = Offset(x, verticalPadding),
+                            end = Offset(x, size.height - verticalPadding),
+                            strokeWidth = 1.4f,
+                        )
+                        drawCircle(color = Color.White.copy(alpha = 0.86f), radius = 6.2f, center = Offset(x, y))
+                        drawCircle(color = HyperBlue, radius = 4.1f, center = Offset(x, y))
+                    }
                 }
             }
         }

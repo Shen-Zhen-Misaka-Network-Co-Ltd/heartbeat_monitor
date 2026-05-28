@@ -10,7 +10,7 @@ use std::{
 use axum::{
     body::{to_bytes, Body},
     extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -26,7 +26,12 @@ use sqlx::{
     PgPool, Row, SqlitePool,
 };
 use tokio::sync::{broadcast, RwLock};
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower::ServiceBuilder;
+use tower_http::{
+    cors::CorsLayer,
+    services::ServeDir,
+    set_header::SetResponseHeaderLayer,
+};
 use uuid::Uuid;
 
 const MIN_BPM: i32 = 30;
@@ -1076,6 +1081,17 @@ async fn app_with_database(database_url: &str) -> anyhow::Result<Router> {
 
     let web_dir = web_dir();
 
+    let static_service = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, max-age=0, must-revalidate"),
+        ))
+        .service(
+            ServeDir::new(web_dir)
+                .precompressed_gzip()
+                .append_index_html_on_directories(true),
+        );
+
     let router = Router::new()
         .route("/api/v1/collector/sessions", post(create_session))
         .route("/api/v1/hr/batches", post(ingest_batch))
@@ -1085,11 +1101,7 @@ async fn app_with_database(database_url: &str) -> anyhow::Result<Router> {
             "/api/v1/participants/{collector_id}/series",
             get(participant_series),
         )
-        .fallback_service(
-            ServeDir::new(web_dir)
-                .precompressed_gzip()
-                .append_index_html_on_directories(true),
-        )
+        .fallback_service(static_service)
         .layer(CorsLayer::permissive())
         .with_state(state);
     Ok(router)
