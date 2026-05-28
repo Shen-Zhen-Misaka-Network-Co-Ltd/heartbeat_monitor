@@ -1,9 +1,10 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiohttp import web, WSMsgType
 
 clients: dict[str, dict] = {}
+history: dict[str, list[dict]] = {}
 ws_clients: set[web.WebSocketResponse] = set()
 HR_NORMAL_MIN = 50
 HR_NORMAL_MAX = 100
@@ -14,6 +15,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>心率监控面板</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #e2e8f0; min-height: 100vh; position: relative; background: #0f172a; background-size: cover; background-position: center; background-attachment: fixed; }
@@ -38,6 +40,10 @@ body::before { content: ''; position: fixed; inset: 0; background: rgba(10, 15, 
 .hr-normal .hr-value { color: #22c55e; }
 .hr-high .hr-value { color: #f43f5e; }
 .empty { grid-column: 1 / -1; text-align: center; padding: 80px 20px; color: #475569; font-size: 15px; }
+.card { cursor: pointer; }
+.client-widget { break-inside: avoid; }
+.chart-wrap { background: rgba(30, 41, 59, .5); border-radius: 0 0 16px 16px; padding: 16px 24px 24px; margin-top: -1px; border: 1px solid rgba(255,255,255,.06); border-top: none; }
+.chart-inner { position: relative; height: 200px; }
 </style>
 </head>
 <body>
@@ -72,10 +78,11 @@ function buildCard(name, c) {
   var hr = c.heart_rate || '&mdash;';
   var model = c.device_model || 'Unknown';
   var time = c.last_seen ? c.last_seen.slice(11, 19) : '&mdash;';
-  return '<div class="card hr-' + zone + '">'
+  var safeName = (name || '').replace(/"/g, '&quot;');
+  return '<div class="card hr-' + zone + '" data-name="' + safeName + '">'
     + '<span class="status-dot ' + status + '"></span>'
     + '<span class="hr-bg">' + hr + '</span>'
-    + '<div class="name">' + name + '</div>'
+    + '<div class="name">' + safeName + '</div>'
     + '<div class="hr-value">' + hr + '</div>'
     + '<div class="hr-label">BPM</div>'
     + '<div class="meta">'
@@ -94,14 +101,132 @@ function render(data) {
   }
   var online = 0;
   var now = Date.now();
-  var cards = keys.map(function(name) {
+
+  var widgets = {};
+  Array.from(grid.children).forEach(function(el) {
+    if (el.classList.contains('client-widget'))
+      widgets[el.dataset.name] = el;
+  });
+
+  keys.forEach(function(name) {
     var c = data[name];
     if (c.last_seen && (now - new Date(c.last_seen).getTime()) / 1000 < 10) online++;
-    return buildCard(name, c);
+    var html = buildCard(name, c);
+    if (widgets[name]) {
+      var oldCard = widgets[name].querySelector('.card');
+      if (oldCard) oldCard.outerHTML = html;
+      delete widgets[name];
+    } else {
+      var w = document.createElement('div');
+      w.className = 'client-widget';
+      w.dataset.name = name;
+      w.innerHTML = html;
+      grid.appendChild(w);
+    }
   });
-  grid.innerHTML = cards.join('');
+
+  Object.keys(widgets).forEach(function(name) {
+    closeChart(name);
+    widgets[name].remove();
+  });
   document.getElementById('count').textContent = online + ' 人在线';
 }
+
+var chartInstances = {};
+var historyCache = {};
+
+function fmtTime(iso) {
+  if (!iso || iso.length < 16) return iso;
+  return iso.slice(5, 16);
+}
+
+function renderChart(name, records) {
+  var safeName = name.replace(/[^a-zA-Z0-9_]/g, '_');
+  var ctx = document.getElementById('canvas-' + safeName);
+  if (!ctx) return;
+  var labels = records.map(function(r) { return fmtTime(r.last_seen); });
+  var values = records.map(function(r) { return r.heart_rate || 0; });
+  chartInstances[name] = new Chart(ctx.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: '心率 (BPM)',
+        data: values,
+        borderColor: '#22c55e',
+        backgroundColor: 'rgba(34,197,94,0.1)',
+        borderWidth: 2,
+        tension: 0.3,
+        fill: true,
+        pointRadius: 3,
+        pointBackgroundColor: '#22c55e'
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', maxTicksLimit: 10, font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.05)' }
+        },
+        y: {
+          ticks: { color: '#94a3b8', font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.08)' },
+          beginAtZero: false
+        }
+      }
+    }
+  });
+}
+
+function fetchChart(name) {
+  if (historyCache[name]) {
+    renderChart(name, historyCache[name]);
+    return;
+  }
+  fetch('/api/history?name=' + encodeURIComponent(name))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      historyCache[name] = data.history || [];
+      renderChart(name, historyCache[name]);
+    });
+}
+
+function openChart(name, card) {
+  var safeName = name.replace(/[^a-zA-Z0-9_]/g, '_');
+  var wrap = document.createElement('div');
+  wrap.className = 'chart-wrap';
+  wrap.id = 'chart-' + safeName;
+  wrap.innerHTML = '<div class="chart-inner"><canvas id="canvas-' + safeName + '"></canvas></div>';
+  card.parentNode.appendChild(wrap);
+  fetchChart(name);
+}
+
+function closeChart(name) {
+  if (chartInstances[name]) {
+    chartInstances[name].destroy();
+    delete chartInstances[name];
+  }
+  var wrap = document.getElementById('chart-' + name.replace(/[^a-zA-Z0-9_]/g, '_'));
+  if (wrap) wrap.remove();
+}
+
+document.getElementById('grid').addEventListener('click', function(e) {
+  var card = e.target.closest('.card');
+  if (!card) return;
+  var name = card.getAttribute('data-name');
+  if (!name) return;
+  var wrapId = 'chart-' + name.replace(/[^a-zA-Z0-9_]/g, '_');
+  if (document.getElementById(wrapId)) {
+    closeChart(name);
+  } else {
+    Object.keys(chartInstances).forEach(function(n) { closeChart(n); });
+    openChart(name, card);
+  }
+});
 
 ws.onmessage = function(e) {
   render(JSON.parse(e.data));
@@ -144,11 +269,20 @@ async def handle_heartbeat(request: web.Request) -> web.Response:
     if not name:
         return web.json_response({"status": "error", "message": "name required"}, status=400)
 
-    clients[name] = {
+    now = datetime.now()
+    record = {
         "heart_rate": data.get("heart_rate"),
         "device_model": data.get("device_model", "Unknown"),
-        "last_seen": datetime.now().isoformat(),
+        "last_seen": now.isoformat(),
     }
+    clients[name] = record
+
+    if name not in history:
+        history[name] = []
+    history[name].append(record)
+    cutoff = now - timedelta(days=7)
+    history[name] = [r for r in history[name] if datetime.fromisoformat(r["last_seen"]) >= cutoff]
+
     await broadcast(clients)
     return web.json_response({"status": "ok"})
 
@@ -168,6 +302,25 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_history(request: web.Request) -> web.Response:
+    name = request.query.get("name")
+    if not name:
+        return web.json_response({"status": "error", "message": "name required"}, status=400)
+    records = history.get(name, [])
+
+    MAX_POINTS = 200
+    if len(records) > MAX_POINTS:
+        step = len(records) / MAX_POINTS
+        sampled = []
+        for i in range(MAX_POINTS):
+            idx = int(i * step)
+            if idx < len(records):
+                sampled.append(records[idx])
+        records = sampled
+
+    return web.json_response({"history": records})
+
+
 async def handle_dashboard(request: web.Request) -> web.Response:
     ua = request.headers.get("User-Agent", "").lower()
     is_mobile = any(kw in ua for kw in ("mobile", "android", "iphone", "ipad"))
@@ -181,6 +334,7 @@ def main():
 
     app = web.Application()
     app.router.add_post("/api/heartbeat", handle_heartbeat)
+    app.router.add_get("/api/history", handle_history)
     app.router.add_get("/ws", handle_ws)
     app.router.add_get("/", handle_dashboard)
 
