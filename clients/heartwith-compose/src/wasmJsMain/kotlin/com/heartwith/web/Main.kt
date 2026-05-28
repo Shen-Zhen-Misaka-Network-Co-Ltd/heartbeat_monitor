@@ -67,6 +67,8 @@ fun main() {
             var expandedParticipantIds by remember { mutableStateOf(emptySet<String>()) }
             var seriesByParticipantId by remember { mutableStateOf(emptyMap<String, List<SeriesSample>>()) }
             var seriesStatusByParticipantId by remember { mutableStateOf(emptyMap<String, String>()) }
+            var seriesWindowByParticipantId by remember { mutableStateOf(emptyMap<String, Long>()) }
+            var seriesLoadedAtByParticipantId by remember { mutableStateOf(emptyMap<String, Long>()) }
             var seriesWindowSeconds by remember { mutableStateOf(10 * 60L) }
             var offlineFilterSeconds by remember { mutableStateOf<Long?>(60 * 60L) }
             var state by remember {
@@ -90,11 +92,23 @@ fun main() {
                     else -> if (useEnglishLabels) "Custom range" else "自定义范围"
                 }
 
-            suspend fun loadSeries(participant: Participant, windowSeconds: Long = seriesWindowSeconds) {
+            suspend fun loadSeries(
+                participant: Participant,
+                windowSeconds: Long = seriesWindowSeconds,
+                force: Boolean = false,
+            ) {
                 val collectorId = participant.collectorId
+                val currentMs = com.heartwith.shared.nowMs()
+                val loadedWindow = seriesWindowByParticipantId[collectorId]
+                val loadedAt = seriesLoadedAtByParticipantId[collectorId] ?: 0L
+                if (!force && loadedWindow == windowSeconds && currentMs - loadedAt < 30_000L) {
+                    return
+                }
                 runCatching { api.participantSeries(participant.collectorId, windowSeconds = windowSeconds) }
                     .onSuccess { response ->
                         seriesByParticipantId = seriesByParticipantId + (collectorId to response.samples)
+                        seriesWindowByParticipantId = seriesWindowByParticipantId + (collectorId to response.windowSeconds)
+                        seriesLoadedAtByParticipantId = seriesLoadedAtByParticipantId + (collectorId to currentMs)
                         seriesStatusByParticipantId = seriesStatusByParticipantId + (
                             collectorId to seriesWindowLabel(response.windowSeconds)
                         )
@@ -124,6 +138,8 @@ fun main() {
                 expandedParticipantIds = expandedParticipantIds.intersect(existingIds)
                 seriesByParticipantId = seriesByParticipantId.filterKeys { it in existingIds }
                 seriesStatusByParticipantId = seriesStatusByParticipantId.filterKeys { it in existingIds }
+                seriesWindowByParticipantId = seriesWindowByParticipantId.filterKeys { it in existingIds }
+                seriesLoadedAtByParticipantId = seriesLoadedAtByParticipantId.filterKeys { it in existingIds }
             }
 
             fun reloadExpandedSeries(windowSeconds: Long = seriesWindowSeconds) {
@@ -131,7 +147,7 @@ fun main() {
                     state.participants
                         .let { filterRecentlySeenParticipants(it, offlineFilterSeconds) }
                         .filter { it.collectorId in expandedParticipantIds }
-                        .forEach { participant -> loadSeries(participant, windowSeconds) }
+                        .forEach { participant -> loadSeries(participant, windowSeconds, force = true) }
                 }
             }
 
@@ -196,6 +212,7 @@ fun main() {
                 seriesStatusByParticipantId = seriesStatusByParticipantId,
                 seriesWindowSeconds = seriesWindowSeconds,
                 onSeriesWindowChange = { seconds ->
+                    if (seconds == seriesWindowSeconds) return@HeartwithScreen
                     seriesWindowSeconds = seconds
                     reloadExpandedSeries(seconds)
                 },

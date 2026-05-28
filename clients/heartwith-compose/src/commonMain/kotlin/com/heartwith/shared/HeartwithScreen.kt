@@ -237,7 +237,7 @@ private fun LobbyHeader(
         SectionTitle(text = if (useEnglishLabels) "Lobby" else "大厅")
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = if (useEnglishLabels) "Seen" else "上线",
+                text = if (useEnglishLabels) "Hide offline after" else "隐藏离线超过",
                 fontSize = 12.sp,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
@@ -1007,7 +1007,7 @@ private data class OfflineFilterOption(
             OfflineFilterOption(10 * 60, "10 分钟", "10m"),
             OfflineFilterOption(60 * 60, "1 小时", "1h"),
             OfflineFilterOption(6 * 60 * 60, "6 小时", "6h"),
-            OfflineFilterOption(null, "全部", "All"),
+            OfflineFilterOption(null, "显示全部", "All"),
         )
     }
 }

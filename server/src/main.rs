@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
@@ -1372,7 +1373,11 @@ async fn lobby_events(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    )
 }
 
 async fn participant_series(
