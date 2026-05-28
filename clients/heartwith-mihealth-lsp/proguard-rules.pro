@@ -1,0 +1,2 @@
+-keep class com.heartwith.mihealth.lsp.MiHealthHookModule { *; }
+-keep class com.heartwith.mihealth.lsp.SettingsProvider { *; }

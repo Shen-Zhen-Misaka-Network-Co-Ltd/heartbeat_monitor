@@ -6,6 +6,7 @@
 - `clients/heartwith-compose/`: Kotlin Compose Multiplatform 客户端。
   - Android: 原生 BLE 订阅小米手环标准心率特征 `0x2A37`，低功耗批量上传。
   - Wasm/JS: 使用 Miuix 的网页大厅。
+- `clients/heartwith-mihealth-lsp/`: LSPosed 分支采集端，hook 小米运动健康实时心率链路并沿用同一套上传协议。
 
 Miuix 采用 `compose-miuix-ui/miuix`，当前依赖版本锁定为 `0.9.1`。
 
@@ -59,3 +60,4 @@ ANDROID_HOME=/path/to/android-sdk ./gradlew :heartwith-compose:allTests
 接口文档见 [docs/API.md](docs/API.md)。
 协议选择和省电策略见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
 数据库选择见 [docs/DATABASE.md](docs/DATABASE.md)。
+小米运动健康 hook 分支见 [docs/MIHEALTH_LSPOSED.md](docs/MIHEALTH_LSPOSED.md)。

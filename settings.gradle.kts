@@ -17,3 +17,5 @@ dependencyResolutionManagement {
 rootProject.name = "heartwith"
 include(":heartwith-compose")
 project(":heartwith-compose").projectDir = file("clients/heartwith-compose")
+include(":heartwith-mihealth-lsp")
+project(":heartwith-mihealth-lsp").projectDir = file("clients/heartwith-mihealth-lsp")
