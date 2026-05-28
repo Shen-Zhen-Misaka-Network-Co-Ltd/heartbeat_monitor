@@ -157,12 +157,6 @@ public final class SettingsActivity extends Activity {
         configCard.addView(save, matchWrapWithTop(18));
         root.addView(configCard, matchWrapWithTop(18));
 
-        LinearLayout noteCard = card();
-        noteCard.addView(sectionTitle("后台策略"), matchWrap());
-        noteCard.addView(muted("模块代码运行在小米运动健康进程内，不需要自己的 BLE 扫描和保活。需要后台持续采集时，请给小米运动健康开启后台保活/自启动。"), matchWrapWithTop(8));
-        noteCard.addView(muted("通知、心率采集和上传都由小米运动健康进程触发；这个 App 只保存配置和展示最近状态。"), matchWrapWithTop(8));
-        root.addView(noteCard, matchWrapWithTop(18));
-
         setContentView(scrollView);
     }
 
