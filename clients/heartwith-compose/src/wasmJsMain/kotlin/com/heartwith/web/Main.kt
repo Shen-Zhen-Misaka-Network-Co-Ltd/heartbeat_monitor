@@ -4,6 +4,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -81,6 +82,7 @@ fun main() {
                     ),
                 )
             }
+            val latestState by rememberUpdatedState(state)
             val visibleParticipants = filterRecentlySeenParticipants(state.participants, offlineFilterSeconds)
 
             fun seriesWindowLabel(windowSeconds: Long): String =
@@ -144,11 +146,34 @@ fun main() {
 
             fun reloadExpandedSeries(windowSeconds: Long = seriesWindowSeconds) {
                 scope.launch {
-                    state.participants
+                    latestState.participants
                         .let { filterRecentlySeenParticipants(it, offlineFilterSeconds) }
                         .filter { it.collectorId in expandedParticipantIds }
                         .forEach { participant -> loadSeries(participant, windowSeconds, force = true) }
                 }
+            }
+
+            fun appendLiveSeriesSample(participant: Participant) {
+                val bpm = participant.lastBpm ?: return
+                val tMs = participant.lastSeenMs ?: participant.updatedAtMs ?: return
+                val collectorId = participant.collectorId
+                if (collectorId !in expandedParticipantIds) return
+                val cutoffMs = tMs - 24 * 60 * 60 * 1000L
+                val current = seriesByParticipantId[collectorId].orEmpty()
+                val existingIndex = current.indexOfFirst { it.tMs == tMs }
+                val sample = SeriesSample(tMs = tMs, bpm = bpm)
+                val next = if (existingIndex >= 0) {
+                    current.toMutableList().also { it[existingIndex] = sample }
+                } else {
+                    current + sample
+                }
+                seriesByParticipantId = seriesByParticipantId + (
+                    collectorId to next
+                        .filter { it.tMs >= cutoffMs }
+                        .sortedBy { it.tMs }
+                        .takeLast(1_200)
+                )
+                seriesLoadedAtByParticipantId = seriesLoadedAtByParticipantId + (collectorId to com.heartwith.shared.nowMs())
             }
 
             suspend fun refresh() {
@@ -178,11 +203,12 @@ fun main() {
                     { data ->
                         runCatching { json.decodeFromString<LobbyEventEnvelope>(data) }
                             .onSuccess { event ->
-                                val participants = applyLobbyEvent(state.participants, event)
+                                val participants = applyLobbyEvent(latestState.participants, event)
                                 state = state.copy(
                                     localStatus = if (useEnglishLabels) "Live lobby events connected" else "已连接实时事件",
                                     participants = participants,
                                 )
+                                event.participant?.let { appendLiveSeriesSample(it) }
                                 clearMissingExpandedParticipants(participants)
                             }
                     },
