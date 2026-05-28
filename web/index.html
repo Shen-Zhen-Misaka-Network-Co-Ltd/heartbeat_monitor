@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Heartwith</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050505;
+        --panel: #242424;
+        --panel-2: #303030;
+        --card: #001626;
+        --text: #f7f7f7;
+        --muted: #9b9b9f;
+        --line: #168bff;
+        --danger: #e5484d;
+        --warn: #c98200;
+        --radius: 18px;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      }
+      main { width: min(100%, 1480px); margin: 0 auto; padding: 32px clamp(16px, 3vw, 34px) 44px; }
+      header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
+      h1 { margin: 0; font-size: clamp(34px, 4vw, 52px); line-height: 1.05; font-weight: 520; letter-spacing: 0; }
+      .subtitle { margin-top: 8px; color: var(--muted); font-size: 16px; font-weight: 520; }
+      button {
+        border: 0;
+        border-radius: 14px;
+        background: #4a4a4a;
+        color: var(--text);
+        min-height: 44px;
+        padding: 0 18px;
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+      button:hover { background: #5a5a5a; }
+      .summary { display: grid; grid-template-columns: minmax(0, 1fr) 150px 150px; gap: 12px; margin-bottom: 24px; }
+      .hero, .metric, .person, .chart-card {
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+      .hero { min-height: 116px; padding: 20px; background: #464646; }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        padding: 0 8px;
+        border-radius: 7px;
+        background: rgba(22, 139, 255, .16);
+        color: var(--line);
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .hero-title { margin-top: 16px; font-size: clamp(26px, 3vw, 36px); font-weight: 720; }
+      .hero-sub { margin-top: 10px; color: #c2c2c5; font-size: 14px; }
+      .metric { padding: 18px; }
+      .metric-label { color: var(--muted); font-size: 14px; font-weight: 650; }
+      .metric-value { margin-top: 6px; font-size: 30px; font-weight: 680; }
+      h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+        gap: 14px;
+        align-items: start;
+      }
+      .item { min-width: 0; }
+      .person {
+        width: 100%;
+        min-height: 128px;
+        padding: 20px;
+        background: var(--card);
+        text-align: left;
+      }
+      .person.offline { background: #222; }
+      .person.stale { background: #23210f; }
+      .person-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+      .name { font-size: 21px; font-weight: 670; overflow-wrap: anywhere; }
+      .meta { margin-top: 5px; color: var(--muted); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+      .bpm { color: var(--line); font-size: 30px; font-weight: 720; white-space: nowrap; }
+      .status {
+        display: inline-flex;
+        min-height: 22px;
+        align-items: center;
+        border-radius: 7px;
+        padding: 0 7px;
+        font-size: 12px;
+        font-weight: 760;
+        background: rgba(22, 139, 255, .16);
+        color: var(--line);
+      }
+      .status.stale { background: rgba(201, 130, 0, .2); color: var(--warn); }
+      .status.offline { background: rgba(255, 255, 255, .12); color: #b7b7b7; }
+      .chart-card { margin-top: 10px; padding: 18px; position: relative; }
+      .chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+      .chart-title { color: var(--muted); font-size: 14px; font-weight: 650; }
+      .chart-name { margin-top: 4px; font-size: 22px; font-weight: 720; overflow-wrap: anywhere; }
+      .ranges { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+      .ranges button { min-height: 32px; padding: 0 10px; border-radius: 10px; font-size: 13px; }
+      .ranges button.active { background: var(--line); color: white; }
+      .plot { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 10px; align-items: stretch; }
+      .y-axis { display: flex; flex-direction: column; justify-content: space-between; color: var(--muted); font-size: 12px; text-align: right; padding: 8px 0 20px; }
+      .canvas-wrap { position: relative; height: 190px; background: #151515; border-radius: 9px; overflow: hidden; }
+      canvas { width: 100%; height: 100%; display: block; }
+      .x-axis { grid-column: 2; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
+      .stats { margin-top: 12px; display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 13px; font-weight: 600; flex-wrap: wrap; }
+      .tooltip {
+        position: absolute;
+        pointer-events: none;
+        transform: translate(-50%, calc(-100% - 10px));
+        background: rgba(0, 0, 0, .82);
+        color: white;
+        border: 1px solid rgba(255, 255, 255, .18);
+        border-radius: 9px;
+        padding: 8px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+        display: none;
+      }
+      .empty { padding: 28px; border-radius: var(--radius); background: var(--panel); color: var(--muted); font-weight: 600; }
+      @media (max-width: 760px) {
+        main { padding-top: 24px; }
+        header { align-items: stretch; flex-direction: column; }
+        .summary { grid-template-columns: 1fr 1fr; }
+        .hero { grid-column: 1 / -1; }
+        .canvas-wrap { height: 180px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Heartwith</h1>
+          <div class="subtitle" data-i18n="subtitle">公共心率大厅</div>
+        </div>
+        <button id="refresh" data-i18n="refresh">刷新</button>
+      </header>
+      <section class="summary">
+        <div class="hero">
+          <span class="tag" data-i18n="tag">实时大厅</span>
+          <div class="hero-title" id="heroTitle">等待心率</div>
+          <div class="hero-sub" id="heroSub">正在连接实时事件</div>
+        </div>
+        <div class="metric"><div class="metric-label" data-i18n="online">在线</div><div class="metric-value" id="onlineCount">0</div></div>
+        <div class="metric"><div class="metric-label" data-i18n="total">全部</div><div class="metric-value" id="totalCount">0</div></div>
+      </section>
+      <h2 data-i18n="lobby">大厅</h2>
+      <section class="grid" id="grid"></section>
+    </main>
+    <script>
+      const zh = (navigator.language || "").toLowerCase().startsWith("zh");
+      const text = {
+        subtitle: zh ? "公共心率大厅" : "Public heart-rate lobby",
+        refresh: zh ? "刷新" : "Refresh",
+        tag: zh ? "实时大厅" : "Live lobby",
+        lobby: zh ? "大厅" : "Lobby",
+        waiting: zh ? "等待心率" : "Waiting",
+        connecting: zh ? "正在连接实时事件" : "Connecting live lobby events",
+        connected: zh ? "已连接实时事件" : "Live lobby events connected",
+        polling: zh ? "实时事件断开，正在轮询" : "Live events disconnected; polling",
+        online: zh ? "在线" : "Online",
+        total: zh ? "全部" : "Total",
+        trend: zh ? "心率趋势" : "Heart-rate trend",
+        noSamples: zh ? "等待更多样本" : "Waiting for samples",
+        last10: zh ? "10 分钟" : "10 min",
+        last60: zh ? "1 小时" : "1 hour",
+        last360: zh ? "6 小时" : "6 hours",
+        samples: zh ? "个样本" : "samples",
+        avg: zh ? "平均" : "avg",
+        min: zh ? "最低" : "min",
+        max: zh ? "最高" : "max",
+        now: zh ? "现在" : "now",
+        ago: zh ? "前" : "ago",
+        justNow: zh ? "刚刚" : "just now",
+        empty: zh ? "还没有采集端在线" : "No collectors yet",
+      };
+      document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = text[el.dataset.i18n]; });
+
+      const state = { participants: [], expanded: new Set(), series: new Map(), windowSeconds: 600 };
+      const grid = document.getElementById("grid");
+      const heroTitle = document.getElementById("heroTitle");
+      const heroSub = document.getElementById("heroSub");
+      const onlineCount = document.getElementById("onlineCount");
+      const totalCount = document.getElementById("totalCount");
+      const ranges = [[600, text.last10], [3600, text.last60], [21600, text.last360]];
+
+      function relative(ms) {
+        if (!ms) return "-";
+        const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+        if (s < 8) return text.justNow;
+        if (s < 60) return `${s}s ${text.ago}`;
+        const m = Math.round(s / 60);
+        if (m < 60) return `${m}m ${text.ago}`;
+        return `${Math.round(m / 60)}h ${text.ago}`;
+      }
+      function timeLabel(ms) {
+        return new Date(ms).toLocaleTimeString(zh ? "zh-CN" : undefined, { hour: "2-digit", minute: "2-digit" });
+      }
+      function statusRank(status) { return status === "online" ? 0 : status === "stale" ? 1 : 2; }
+      function sortParticipants(items) {
+        return [...items].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.display_name.localeCompare(b.display_name));
+      }
+      function applyEvent(event) {
+        if (event.type === "snapshot") state.participants = sortParticipants(event.participants || []);
+        if (event.type === "participant_update" && event.participant) {
+          const next = state.participants.filter((p) => p.collector_id !== event.participant.collector_id);
+          next.push(event.participant);
+          state.participants = sortParticipants(next);
+        }
+        render();
+      }
+      async function loadLobby(statusText = text.connected) {
+        const res = await fetch("/api/v1/lobby/participants");
+        const data = await res.json();
+        state.participants = sortParticipants(data.participants || []);
+        heroSub.textContent = statusText;
+        render();
+      }
+      async function loadSeries(id) {
+        const res = await fetch(`/api/v1/participants/${encodeURIComponent(id)}/series?window_seconds=${state.windowSeconds}`);
+        const data = await res.json();
+        state.series.set(id, data.samples || []);
+        render();
+      }
+      function render() {
+        const online = state.participants.filter((p) => p.status === "online").length;
+        onlineCount.textContent = online;
+        totalCount.textContent = state.participants.length;
+        const freshest = state.participants.find((p) => p.last_bpm != null);
+        heroTitle.textContent = freshest ? `${freshest.last_bpm} BPM` : text.waiting;
+        grid.innerHTML = "";
+        if (state.participants.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = text.empty;
+          grid.appendChild(empty);
+          return;
+        }
+        for (const p of state.participants) {
+          const item = document.createElement("article");
+          item.className = "item";
+          const card = document.createElement("button");
+          card.className = `person ${p.status}`;
+          card.innerHTML = `
+            <div class="person-top">
+              <div>
+                <div class="name"></div>
+                <div class="meta"></div>
+              </div>
+              <div>
+                <span class="status ${p.status}">${p.status}</span>
+                <div class="bpm">${p.last_bpm ?? "--"}</div>
+              </div>
+            </div>`;
+          card.querySelector(".name").textContent = p.display_name;
+          card.querySelector(".meta").textContent = `${p.device_model} · ${p.status} · ${relative(p.last_seen_ms)}`;
+          card.onclick = () => {
+            if (state.expanded.has(p.collector_id)) state.expanded.delete(p.collector_id);
+            else { state.expanded.add(p.collector_id); loadSeries(p.collector_id); }
+            render();
+          };
+          item.appendChild(card);
+          if (state.expanded.has(p.collector_id)) item.appendChild(chartCard(p));
+          grid.appendChild(item);
+        }
+      }
+      function chartCard(p) {
+        const samples = state.series.get(p.collector_id) || [];
+        const wrap = document.createElement("section");
+        wrap.className = "chart-card";
+        wrap.innerHTML = `
+          <div class="chart-head">
+            <div><div class="chart-title">${text.trend}</div><div class="chart-name"></div></div>
+            <div class="ranges"></div>
+          </div>
+          <div class="plot">
+            <div class="y-axis"></div>
+            <div class="canvas-wrap"><canvas></canvas><div class="tooltip"></div></div>
+            <div class="x-axis"><span></span><span>${text.now}</span></div>
+          </div>
+          <div class="stats"></div>`;
+        wrap.querySelector(".chart-name").textContent = p.display_name;
+        const buttons = wrap.querySelector(".ranges");
+        for (const [seconds, label] of ranges) {
+          const btn = document.createElement("button");
+          btn.textContent = label;
+          btn.className = seconds === state.windowSeconds ? "active" : "";
+          btn.onclick = (ev) => { ev.stopPropagation(); state.windowSeconds = seconds; loadSeries(p.collector_id); };
+          buttons.appendChild(btn);
+        }
+        drawChart(wrap, samples);
+        return wrap;
+      }
+      function drawChart(root, samples) {
+        const canvas = root.querySelector("canvas");
+        const holder = root.querySelector(".canvas-wrap");
+        const tooltip = root.querySelector(".tooltip");
+        const yAxis = root.querySelector(".y-axis");
+        const xAxis = root.querySelector(".x-axis span");
+        const stats = root.querySelector(".stats");
+        const rect = holder.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        const ctx = canvas.getContext("2d");
+        ctx.scale(dpr, dpr);
+        const w = rect.width, h = rect.height, pad = 12;
+        ctx.clearRect(0, 0, w, h);
+        ctx.strokeStyle = "rgba(255,255,255,.08)";
+        ctx.lineWidth = 1;
+        for (let i = 1; i <= 3; i++) {
+          const y = (h / 4) * i;
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        }
+        if (samples.length === 0) {
+          yAxis.innerHTML = "<span>--</span><span>--</span><span>--</span>";
+          xAxis.textContent = "";
+          stats.textContent = text.noSamples;
+          return;
+        }
+        const bpms = samples.map((s) => s.bpm);
+        const minBpm = Math.max(30, Math.min(...bpms) - 4);
+        const maxBpm = Math.min(240, Math.max(...bpms) + 4);
+        const minT = Math.min(...samples.map((s) => s.t_ms));
+        const maxT = Math.max(...samples.map((s) => s.t_ms));
+        const x = (t) => pad + ((t - minT) / Math.max(1, maxT - minT)) * (w - pad * 2);
+        const y = (bpm) => pad + (1 - (bpm - minBpm) / Math.max(1, maxBpm - minBpm)) * (h - pad * 2);
+        yAxis.innerHTML = `<span>${maxBpm}</span><span>${Math.round((maxBpm + minBpm) / 2)}</span><span>${minBpm}</span>`;
+        xAxis.textContent = timeLabel(minT);
+        ctx.beginPath();
+        samples.forEach((s, i) => i ? ctx.lineTo(x(s.t_ms), y(s.bpm)) : ctx.moveTo(x(s.t_ms), y(s.bpm)));
+        ctx.strokeStyle = "#168bff";
+        ctx.lineWidth = 3;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.stroke();
+        const avg = Math.round(bpms.reduce((a, b) => a + b, 0) / bpms.length);
+        stats.textContent = `${text.min} ${Math.min(...bpms)} · ${text.max} ${Math.max(...bpms)} · ${text.avg} ${avg} · ${samples.length} ${text.samples}`;
+        const showTip = (clientX) => {
+          const r = holder.getBoundingClientRect();
+          const pos = Math.max(0, Math.min(r.width, clientX - r.left));
+          const targetT = minT + (pos / r.width) * (maxT - minT);
+          const nearest = samples.reduce((a, b) => Math.abs(b.t_ms - targetT) < Math.abs(a.t_ms - targetT) ? b : a);
+          tooltip.style.display = "block";
+          tooltip.style.left = `${x(nearest.t_ms)}px`;
+          tooltip.style.top = `${y(nearest.bpm)}px`;
+          tooltip.textContent = `${timeLabel(nearest.t_ms)} · ${nearest.bpm} BPM`;
+        };
+        holder.onmousemove = (e) => showTip(e.clientX);
+        holder.ontouchmove = (e) => { if (e.touches[0]) showTip(e.touches[0].clientX); };
+        holder.onmouseleave = () => { tooltip.style.display = "none"; };
+      }
+      document.getElementById("refresh").onclick = () => loadLobby();
+      loadLobby(text.connecting).catch(() => { heroSub.textContent = text.polling; });
+      setInterval(() => loadLobby(text.polling).catch(() => {}), 15000);
+      try {
+        const events = new EventSource("/api/v1/lobby/events");
+        events.onmessage = (ev) => { heroSub.textContent = text.connected; applyEvent(JSON.parse(ev.data)); };
+        events.onerror = () => { heroSub.textContent = text.polling; };
+      } catch (_) {}
+      addEventListener("resize", () => render());
+    </script>
+  </body>
+</html>
