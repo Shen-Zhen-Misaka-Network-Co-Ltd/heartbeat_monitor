@@ -154,7 +154,7 @@
         <div class="hero">
           <span class="tag" data-i18n="tag">实时大厅</span>
           <div class="hero-title" id="heroTitle">等待心率</div>
-          <div class="hero-sub" id="heroSub">正在连接实时事件</div>
+          <div class="hero-sub" id="heroSub"></div>
         </div>
         <div class="metric"><div class="metric-label" data-i18n="online">在线</div><div class="metric-value" id="onlineCount">0</div></div>
         <div class="metric"><div class="metric-label" data-i18n="total">全部</div><div class="metric-value" id="totalCount">0</div></div>
@@ -176,9 +176,8 @@
         tag: zh ? "实时大厅" : "Live lobby",
         lobby: zh ? "大厅" : "Lobby",
         waiting: zh ? "等待心率" : "Waiting",
-        connecting: zh ? "正在连接实时事件" : "Connecting live lobby events",
         connected: zh ? "已连接实时事件" : "Live lobby events connected",
-        polling: zh ? "实时事件断开，正在轮询" : "Live events disconnected; polling",
+        disconnected: zh ? "实时事件断开" : "Live events disconnected",
         online: zh ? "在线" : "Online",
         total: zh ? "全部" : "Total",
         seen: zh ? "上线" : "Seen",
@@ -187,6 +186,7 @@
         last10: zh ? "10 分钟" : "10 min",
         last60: zh ? "1 小时" : "1 hour",
         last360: zh ? "6 小时" : "6 hours",
+        last1440: zh ? "24 小时" : "24 hours",
         all: zh ? "全部" : "All",
         samples: zh ? "个样本" : "samples",
         avg: zh ? "平均" : "avg",
@@ -206,8 +206,9 @@
       const onlineCount = document.getElementById("onlineCount");
       const totalCount = document.getElementById("totalCount");
       const seenFilters = document.getElementById("seenFilters");
-      const ranges = [[600, text.last10], [3600, text.last60], [21600, text.last360]];
+      const ranges = [[600, text.last10], [3600, text.last60], [21600, text.last360], [86400, text.last1440]];
       const seenRanges = [[600, "10m"], [3600, "1h"], [21600, "6h"], [null, text.all]];
+      let renderPending = false;
 
       function relative(ms) {
         if (!ms) return "-";
@@ -222,10 +223,21 @@
         return new Date(ms).toLocaleTimeString(zh ? "zh-CN" : undefined, { hour: "2-digit", minute: "2-digit" });
       }
       function statusRank(status) { return status === "online" ? 0 : status === "stale" ? 1 : 2; }
+      function liveStatus(lastSeenMs) {
+        if (!lastSeenMs) return "offline";
+        const age = Date.now() - lastSeenMs;
+        if (age <= 20000) return "online";
+        if (age <= 120000) return "stale";
+        return "offline";
+      }
+      function normalizedParticipant(p) {
+        return { ...p, status: liveStatus(p.last_seen_ms) };
+      }
       function visibleParticipants() {
-        if (state.seenFilterSeconds == null) return state.participants;
+        const participants = state.participants.map(normalizedParticipant);
+        if (state.seenFilterSeconds == null) return participants;
         const cutoff = Date.now() - state.seenFilterSeconds * 1000;
-        return state.participants.filter((p) => p.last_seen_ms && p.last_seen_ms >= cutoff);
+        return participants.filter((p) => p.last_seen_ms && p.last_seen_ms >= cutoff);
       }
       function pruneExpanded(visible) {
         const ids = new Set(visible.map((p) => p.collector_id));
@@ -241,20 +253,29 @@
           next.push(event.participant);
           state.participants = sortParticipants(next);
         }
-        render();
+        scheduleRender();
       }
       async function loadLobby(statusText = text.connected) {
         const res = await fetch("/api/v1/lobby/participants");
         const data = await res.json();
         state.participants = sortParticipants(data.participants || []);
         heroSub.textContent = statusText;
-        render();
+        scheduleRender();
       }
       async function loadSeries(id) {
-        const res = await fetch(`/api/v1/participants/${encodeURIComponent(id)}/series?window_seconds=${state.windowSeconds}`);
+        const maxPoints = state.windowSeconds >= 21600 ? 420 : 600;
+        const res = await fetch(`/api/v1/participants/${encodeURIComponent(id)}/series?window_seconds=${state.windowSeconds}&max_points=${maxPoints}`);
         const data = await res.json();
         state.series.set(id, data.samples || []);
-        render();
+        scheduleRender();
+      }
+      function scheduleRender() {
+        if (renderPending) return;
+        renderPending = true;
+        requestAnimationFrame(() => {
+          renderPending = false;
+          render();
+        });
       }
       function render() {
         const visible = visibleParticipants();
@@ -270,7 +291,7 @@
           const btn = document.createElement("button");
           btn.textContent = label;
           btn.className = seconds === state.seenFilterSeconds ? "active" : "";
-          btn.onclick = () => { state.seenFilterSeconds = seconds; render(); };
+          btn.onclick = () => { state.seenFilterSeconds = seconds; scheduleRender(); };
           seenFilters.appendChild(btn);
         }
         if (visible.length === 0) {
@@ -301,7 +322,7 @@
           card.onclick = () => {
             if (state.expanded.has(p.collector_id)) state.expanded.delete(p.collector_id);
             else { state.expanded.add(p.collector_id); loadSeries(p.collector_id); }
-            render();
+            scheduleRender();
           };
           item.appendChild(card);
           if (state.expanded.has(p.collector_id)) item.appendChild(chartCard(p));
@@ -329,7 +350,12 @@
           const btn = document.createElement("button");
           btn.textContent = label;
           btn.className = seconds === state.windowSeconds ? "active" : "";
-          btn.onclick = (ev) => { ev.stopPropagation(); state.windowSeconds = seconds; loadSeries(p.collector_id); };
+          btn.onclick = (ev) => {
+            ev.stopPropagation();
+            state.windowSeconds = seconds;
+            for (const id of state.expanded) loadSeries(id);
+            scheduleRender();
+          };
           buttons.appendChild(btn);
         }
         drawChart(wrap, samples);
@@ -367,7 +393,7 @@
         const maxBpm = Math.min(240, Math.max(...bpms) + 4);
         const minT = Math.min(...samples.map((s) => s.t_ms));
         const maxT = Math.max(...samples.map((s) => s.t_ms));
-        const displaySamples = smoothSamplesForChart(samples, state.windowSeconds);
+        const displaySamples = samples;
         const x = (t) => pad + ((t - minT) / Math.max(1, maxT - minT)) * (w - pad * 2);
         const y = (bpm) => pad + (1 - (bpm - minBpm) / Math.max(1, maxBpm - minBpm)) * (h - pad * 2);
         yAxis.innerHTML = `<span>${maxBpm}</span><span>${Math.round((maxBpm + minBpm) / 2)}</span><span>${minBpm}</span>`;
@@ -395,40 +421,15 @@
         holder.ontouchmove = (e) => { if (e.touches[0]) showTip(e.touches[0].clientX); };
         holder.onmouseleave = () => { tooltip.style.display = "none"; };
       }
-      function smoothSamplesForChart(samples, windowSeconds) {
-        if (samples.length <= 180 || windowSeconds <= 3600) return samples;
-        const bucketMs = windowSeconds >= 21600 ? 120000 : 30000;
-        const out = [];
-        let bucketStart = null, timeSum = 0, bpmSum = 0, count = 0;
-        const flush = () => {
-          if (!count) return;
-          out.push({ t_ms: Math.round(timeSum / count), bpm: Math.round(bpmSum / count) });
-          timeSum = 0; bpmSum = 0; count = 0;
-        };
-        for (const sample of samples) {
-          if (bucketStart == null || sample.t_ms >= bucketStart + bucketMs) {
-            flush();
-            bucketStart = sample.t_ms;
-          }
-          timeSum += sample.t_ms;
-          bpmSum += sample.bpm;
-          count += 1;
-        }
-        flush();
-        const first = samples[0], last = samples[samples.length - 1];
-        if (out[0]?.t_ms !== first.t_ms) out.unshift(first);
-        if (out[out.length - 1]?.t_ms !== last.t_ms) out.push(last);
-        return out;
-      }
       document.getElementById("refresh").onclick = () => loadLobby();
-      loadLobby(text.connecting).catch(() => { heroSub.textContent = text.polling; });
-      setInterval(() => loadLobby(text.polling).catch(() => {}), 15000);
       try {
         const events = new EventSource("/api/v1/lobby/events");
+        events.onopen = () => { heroSub.textContent = text.connected; };
         events.onmessage = (ev) => { heroSub.textContent = text.connected; applyEvent(JSON.parse(ev.data)); };
-        events.onerror = () => { heroSub.textContent = text.polling; };
+        events.onerror = () => { heroSub.textContent = text.disconnected; };
       } catch (_) {}
-      addEventListener("resize", () => render());
+      setInterval(scheduleRender, 10000);
+      addEventListener("resize", scheduleRender);
     </script>
   </body>
 </html>

@@ -57,8 +57,12 @@ class HeartwithApi(
     suspend fun lobby(): LobbyResponse =
         client.get("$baseUrl/api/v1/lobby/participants").body()
 
-    suspend fun participantSeries(collectorId: String, windowSeconds: Long = 300): SeriesResponse =
-        client.get("$baseUrl/api/v1/participants/$collectorId/series?window_seconds=$windowSeconds").body()
+    suspend fun participantSeries(
+        collectorId: String,
+        windowSeconds: Long = 300,
+        maxPoints: Long = if (windowSeconds >= 6 * 60 * 60) 420 else 600,
+    ): SeriesResponse =
+        client.get("$baseUrl/api/v1/participants/$collectorId/series?window_seconds=$windowSeconds&max_points=$maxPoints").body()
 
     suspend fun rawLobbyEvents(): String =
         client.get("$baseUrl/api/v1/lobby/events").bodyAsText()

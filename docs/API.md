@@ -139,7 +139,12 @@ Event:
 
 ## 5. 最近曲线
 
-`GET /api/v1/participants/{collector_id}/series?window_seconds=300`
+`GET /api/v1/participants/{collector_id}/series?window_seconds=300&max_points=420`
+
+Query:
+
+- `window_seconds`: `60` 到 `86400`，默认 `300`。
+- `max_points`: `60` 到 `1200`，默认 `420`。服务端会按时间桶聚合，避免长时间范围返回过多点。
 
 Response:
 

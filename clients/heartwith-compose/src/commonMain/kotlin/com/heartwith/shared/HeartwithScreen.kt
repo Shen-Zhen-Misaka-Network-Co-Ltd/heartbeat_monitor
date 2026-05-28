@@ -942,6 +942,7 @@ private fun smoothSamplesForChart(samples: List<SeriesSample>, windowSeconds: Lo
     if (samples.size <= MAX_DIRECT_CHART_POINTS || windowSeconds <= 60 * 60) return samples
 
     val bucketMs = when {
+        windowSeconds >= 24 * 60 * 60 -> 5 * 60 * 1000L
         windowSeconds >= 6 * 60 * 60 -> 2 * 60 * 1000L
         windowSeconds >= 60 * 60 -> 30 * 1000L
         else -> 10 * 1000L
@@ -991,6 +992,7 @@ private data class SeriesWindowOption(
             SeriesWindowOption(10 * 60, "10 分钟", "10m"),
             SeriesWindowOption(60 * 60, "1 小时", "1h"),
             SeriesWindowOption(6 * 60 * 60, "6 小时", "6h"),
+            SeriesWindowOption(24 * 60 * 60, "24 小时", "24h"),
         )
     }
 }

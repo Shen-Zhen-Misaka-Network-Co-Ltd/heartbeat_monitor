@@ -33,7 +33,11 @@ const MAX_BPM: i32 = 240;
 const ONLINE_AFTER_MS: i64 = 20_000;
 const OFFLINE_AFTER_MS: i64 = 120_000;
 const MAX_CLOCK_SKEW_MS: i64 = 60_000;
-const SERIES_TTL_MS: i64 = 6 * 60 * 60_000;
+const RAW_SAMPLE_TTL_MS: i64 = 24 * 60 * 60_000;
+const MEMORY_SERIES_TTL_MS: i64 = 10 * 60_000;
+const ROLLUP_TTL_MS: i64 = 90 * 24 * 60 * 60_000;
+const ROLLUP_BUCKET_MS: i64 = 60 * 60_000;
+const DEFAULT_SERIES_MAX_POINTS: i64 = 420;
 const MAX_BODY_BYTES: usize = 128 * 1024;
 
 #[derive(Clone)]
@@ -182,6 +186,8 @@ struct LobbyResponse {
 struct SeriesQuery {
     #[serde(default = "default_window")]
     window_seconds: i64,
+    #[serde(default = "default_series_max_points")]
+    max_points: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -297,6 +303,29 @@ impl Db {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_samples_time ON heart_rate_samples(t_ms)")
             .execute(pool)
             .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS heart_rate_rollups (
+                collector_id TEXT NOT NULL,
+                bucket_ms INTEGER NOT NULL,
+                sample_count INTEGER NOT NULL,
+                bpm_sum INTEGER NOT NULL,
+                min_bpm INTEGER NOT NULL,
+                max_bpm INTEGER NOT NULL,
+                first_t_ms INTEGER NOT NULL,
+                last_t_ms INTEGER NOT NULL,
+                PRIMARY KEY (collector_id, bucket_ms),
+                FOREIGN KEY (collector_id) REFERENCES collectors(collector_id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_rollups_collector_bucket ON heart_rate_rollups(collector_id, bucket_ms)",
+        )
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -381,6 +410,28 @@ impl Db {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_samples_time ON heart_rate_samples(t_ms DESC)")
             .execute(pool)
             .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS heart_rate_rollups (
+                collector_id TEXT NOT NULL REFERENCES collectors(collector_id) ON DELETE CASCADE,
+                bucket_ms BIGINT NOT NULL,
+                sample_count BIGINT NOT NULL,
+                bpm_sum BIGINT NOT NULL,
+                min_bpm INTEGER NOT NULL,
+                max_bpm INTEGER NOT NULL,
+                first_t_ms BIGINT NOT NULL,
+                last_t_ms BIGINT NOT NULL,
+                PRIMARY KEY (collector_id, bucket_ms)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_rollups_collector_bucket ON heart_rate_rollups(collector_id, bucket_ms)",
+        )
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -701,6 +752,88 @@ impl Db {
         }
     }
 
+    async fn series(
+        &self,
+        collector_id: &str,
+        cutoff_ms: i64,
+        window_ms: i64,
+        max_points: i64,
+    ) -> anyhow::Result<Vec<SeriesSample>> {
+        let bucket_ms = (window_ms / max_points.max(1)).max(1);
+        match &self.pool {
+            DbPool::Sqlite(pool) => {
+                self.series_sqlite(pool, collector_id, cutoff_ms, bucket_ms)
+                    .await
+            }
+            DbPool::Postgres(pool) => {
+                self.series_postgres(pool, collector_id, cutoff_ms, bucket_ms)
+                    .await
+            }
+        }
+    }
+
+    async fn series_sqlite(
+        &self,
+        pool: &SqlitePool,
+        collector_id: &str,
+        cutoff_ms: i64,
+        bucket_ms: i64,
+    ) -> anyhow::Result<Vec<SeriesSample>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT CAST(AVG(t_ms) AS INTEGER) AS t_ms, CAST(ROUND(AVG(bpm)) AS INTEGER) AS bpm
+            FROM heart_rate_samples
+            WHERE collector_id = ? AND t_ms >= ?
+            GROUP BY ((t_ms - ?) / ?)
+            ORDER BY t_ms
+            "#,
+        )
+        .bind(collector_id)
+        .bind(cutoff_ms)
+        .bind(cutoff_ms)
+        .bind(bucket_ms)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SeriesSample {
+                t_ms: row.get("t_ms"),
+                bpm: row.get("bpm"),
+            })
+            .collect())
+    }
+
+    async fn series_postgres(
+        &self,
+        pool: &PgPool,
+        collector_id: &str,
+        cutoff_ms: i64,
+        bucket_ms: i64,
+    ) -> anyhow::Result<Vec<SeriesSample>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT AVG(t_ms)::BIGINT AS t_ms, ROUND(AVG(bpm))::INTEGER AS bpm
+            FROM heart_rate_samples
+            WHERE collector_id = $1 AND t_ms >= $2
+            GROUP BY ((t_ms - $3) / $4)
+            ORDER BY t_ms
+            "#,
+        )
+        .bind(collector_id)
+        .bind(cutoff_ms)
+        .bind(cutoff_ms)
+        .bind(bucket_ms)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SeriesSample {
+                t_ms: row.get("t_ms"),
+                bpm: row.get("bpm"),
+            })
+            .collect())
+    }
+
     async fn persist_ingest_sqlite(
         &self,
         pool: &SqlitePool,
@@ -747,10 +880,40 @@ impl Db {
             .bind(recv_ms)
             .execute(&mut *tx)
             .await?;
+            let bucket_ms = rollup_bucket(sample.t_ms);
+            sqlx::query(
+                r#"
+                INSERT INTO heart_rate_rollups (
+                    collector_id, bucket_ms, sample_count, bpm_sum, min_bpm, max_bpm, first_t_ms, last_t_ms
+                )
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
+                    sample_count = sample_count + 1,
+                    bpm_sum = bpm_sum + excluded.bpm_sum,
+                    min_bpm = MIN(min_bpm, excluded.min_bpm),
+                    max_bpm = MAX(max_bpm, excluded.max_bpm),
+                    first_t_ms = MIN(first_t_ms, excluded.first_t_ms),
+                    last_t_ms = MAX(last_t_ms, excluded.last_t_ms)
+                "#,
+            )
+            .bind(&collector.collector_id)
+            .bind(bucket_ms)
+            .bind(sample.bpm as i64)
+            .bind(sample.bpm)
+            .bind(sample.bpm)
+            .bind(sample.t_ms)
+            .bind(sample.t_ms)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query("DELETE FROM heart_rate_samples WHERE collector_id = ? AND t_ms < ?")
             .bind(&collector.collector_id)
-            .bind(recv_ms - SERIES_TTL_MS)
+            .bind(recv_ms - RAW_SAMPLE_TTL_MS)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM heart_rate_rollups WHERE collector_id = ? AND bucket_ms < ?")
+            .bind(&collector.collector_id)
+            .bind(recv_ms - ROLLUP_TTL_MS)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -819,10 +982,40 @@ impl Db {
             .bind(recv_ms)
             .execute(&mut *tx)
             .await?;
+            let bucket_ms = rollup_bucket(sample.t_ms);
+            sqlx::query(
+                r#"
+                INSERT INTO heart_rate_rollups (
+                    collector_id, bucket_ms, sample_count, bpm_sum, min_bpm, max_bpm, first_t_ms, last_t_ms
+                )
+                VALUES ($1, $2, 1, $3, $4, $5, $6, $7)
+                ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
+                    sample_count = heart_rate_rollups.sample_count + 1,
+                    bpm_sum = heart_rate_rollups.bpm_sum + excluded.bpm_sum,
+                    min_bpm = LEAST(heart_rate_rollups.min_bpm, excluded.min_bpm),
+                    max_bpm = GREATEST(heart_rate_rollups.max_bpm, excluded.max_bpm),
+                    first_t_ms = LEAST(heart_rate_rollups.first_t_ms, excluded.first_t_ms),
+                    last_t_ms = GREATEST(heart_rate_rollups.last_t_ms, excluded.last_t_ms)
+                "#,
+            )
+            .bind(&collector.collector_id)
+            .bind(bucket_ms)
+            .bind(sample.bpm as i64)
+            .bind(sample.bpm)
+            .bind(sample.bpm)
+            .bind(sample.t_ms)
+            .bind(sample.t_ms)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query("DELETE FROM heart_rate_samples WHERE collector_id = $1 AND t_ms < $2")
             .bind(&collector.collector_id)
-            .bind(recv_ms - SERIES_TTL_MS)
+            .bind(recv_ms - RAW_SAMPLE_TTL_MS)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM heart_rate_rollups WHERE collector_id = $1 AND bucket_ms < $2")
+            .bind(&collector.collector_id)
+            .bind(recv_ms - ROLLUP_TTL_MS)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -872,7 +1065,7 @@ async fn app() -> anyhow::Result<Router> {
 
 async fn app_with_database(database_url: &str) -> anyhow::Result<Router> {
     let db = Db::connect(database_url).await?;
-    let store = db.load_store(now_ms() - SERIES_TTL_MS).await?;
+    let store = db.load_store(now_ms() - MEMORY_SERIES_TTL_MS).await?;
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         inner: Arc::new(RwLock::new(store)),
@@ -909,9 +1102,8 @@ fn web_dir() -> PathBuf {
         }
     }
 
-    let production = PathBuf::from(
-        "clients/heartwith-compose/build/kotlin-webpack/wasmJs/productionExecutable",
-    );
+    let production =
+        PathBuf::from("clients/heartwith-compose/build/kotlin-webpack/wasmJs/productionExecutable");
     if production.exists() {
         return production;
     }
@@ -1188,18 +1380,19 @@ async fn participant_series(
     AxumPath(collector_id): AxumPath<String>,
     Query(query): Query<SeriesQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
-    let window_seconds = query.window_seconds.clamp(60, 6 * 3600);
-    let cutoff = now_ms() - window_seconds * 1000;
+    let window_seconds = query.window_seconds.clamp(60, 24 * 3600);
+    let max_points = query.max_points.clamp(60, 1200);
+    let window_ms = window_seconds * 1000;
+    let cutoff = now_ms() - window_ms;
     let store = state.inner.read().await;
-    let Some(collector) = store.collectors.get(&collector_id) else {
+    if !store.collectors.contains_key(&collector_id) {
         return Err(ApiError::NotFound);
-    };
-    let samples = collector
-        .series
-        .iter()
-        .filter(|sample| sample.t_ms >= cutoff)
-        .cloned()
-        .collect();
+    }
+    drop(store);
+    let samples = state
+        .db
+        .series(&collector_id, cutoff, window_ms, max_points)
+        .await?;
     Ok(Json(SeriesResponse {
         collector_id,
         window_seconds,
@@ -1315,7 +1508,7 @@ fn status_for(last_seen_ms: Option<i64>, current_ms: i64) -> ParticipantStatus {
 }
 
 fn trim_series(series: &mut VecDeque<SeriesSample>, current_ms: i64) {
-    let cutoff = current_ms - SERIES_TTL_MS;
+    let cutoff = current_ms - MEMORY_SERIES_TTL_MS;
     while series.front().is_some_and(|sample| sample.t_ms < cutoff) {
         series.pop_front();
     }
@@ -1369,6 +1562,14 @@ fn zero_version() -> String {
 
 fn default_window() -> i64 {
     300
+}
+
+fn default_series_max_points() -> i64 {
+    DEFAULT_SERIES_MAX_POINTS
+}
+
+fn rollup_bucket(t_ms: i64) -> i64 {
+    t_ms.div_euclid(ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
 }
 
 #[derive(Debug)]

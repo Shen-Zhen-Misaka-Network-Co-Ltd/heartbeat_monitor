@@ -18,7 +18,7 @@ import com.heartwith.shared.LobbyEventEnvelope
 import com.heartwith.shared.Participant
 import com.heartwith.shared.SeriesSample
 import kotlin.js.ExperimentalWasmJsInterop
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.jetbrains.compose.resources.FontResource
@@ -73,11 +73,7 @@ fun main() {
                 mutableStateOf(
                     HeartwithUiState(
                         serverUrl = "",
-                        localStatus = if (useEnglishLabels) {
-                            "Connecting live lobby events"
-                        } else {
-                            "正在连接实时事件"
-                        },
+                        localStatus = "",
                         localBpm = null,
                         participants = emptyList(),
                     ),
@@ -90,14 +86,12 @@ fun main() {
                     10 * 60L -> if (useEnglishLabels) "Last 10 min" else "最近 10 分钟"
                     60 * 60L -> if (useEnglishLabels) "Last 1 hour" else "最近 1 小时"
                     6 * 60 * 60L -> if (useEnglishLabels) "Last 6 hours" else "最近 6 小时"
+                    24 * 60 * 60L -> if (useEnglishLabels) "Last 24 hours" else "最近 24 小时"
                     else -> if (useEnglishLabels) "Custom range" else "自定义范围"
                 }
 
             suspend fun loadSeries(participant: Participant, windowSeconds: Long = seriesWindowSeconds) {
                 val collectorId = participant.collectorId
-                seriesStatusByParticipantId = seriesStatusByParticipantId + (
-                    collectorId to if (useEnglishLabels) "Loading" else "加载中"
-                )
                 runCatching { api.participantSeries(participant.collectorId, windowSeconds = windowSeconds) }
                     .onSuccess { response ->
                         seriesByParticipantId = seriesByParticipantId + (collectorId to response.samples)
@@ -173,45 +167,23 @@ fun main() {
                                     localStatus = if (useEnglishLabels) "Live lobby events connected" else "已连接实时事件",
                                     participants = participants,
                                 )
-                                scope.launch {
-                                    participants
-                                        .let { filterRecentlySeenParticipants(it, offlineFilterSeconds) }
-                                        .filter { it.collectorId in expandedParticipantIds }
-                                        .forEach { participant -> loadSeries(participant) }
-                                    clearMissingExpandedParticipants(participants)
-                                }
+                                clearMissingExpandedParticipants(participants)
                             }
                     },
                     {
                         state = state.copy(
                             localStatus = if (useEnglishLabels) {
-                                "Live events disconnected; polling"
+                                "Live events disconnected"
                             } else {
-                                "实时事件断开，使用定时刷新"
+                                "实时事件断开"
                             },
                         )
                     },
                 )
                 try {
-                    refresh()
-                    while (true) {
-                        delay(60_000)
-                        refresh()
-                    }
+                    awaitCancellation()
                 } finally {
                     close()
-                }
-            }
-
-            LaunchedEffect(Unit) {
-                while (true) {
-                    delay(15_000)
-                    val shouldPoll = state.localStatus.contains("disconnected", ignoreCase = true) ||
-                        state.localStatus.contains("断开") ||
-                        state.participants.isEmpty()
-                    if (shouldPoll) {
-                        refresh()
-                    }
                 }
             }
 
