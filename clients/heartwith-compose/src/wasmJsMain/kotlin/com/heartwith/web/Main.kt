@@ -68,6 +68,7 @@ fun main() {
             var seriesByParticipantId by remember { mutableStateOf(emptyMap<String, List<SeriesSample>>()) }
             var seriesStatusByParticipantId by remember { mutableStateOf(emptyMap<String, String>()) }
             var seriesWindowSeconds by remember { mutableStateOf(10 * 60L) }
+            var offlineFilterSeconds by remember { mutableStateOf<Long?>(60 * 60L) }
             var state by remember {
                 mutableStateOf(
                     HeartwithUiState(
@@ -82,6 +83,7 @@ fun main() {
                     ),
                 )
             }
+            val visibleParticipants = filterRecentlySeenParticipants(state.participants, offlineFilterSeconds)
 
             fun seriesWindowLabel(windowSeconds: Long): String =
                 when (windowSeconds) {
@@ -118,8 +120,13 @@ fun main() {
                     }
             }
 
-            fun clearMissingExpandedParticipants() {
-                val existingIds = state.participants.map { it.collectorId }.toSet()
+            fun clearMissingExpandedParticipants(
+                participants: List<Participant> = state.participants,
+                filterSeconds: Long? = offlineFilterSeconds,
+            ) {
+                val existingIds = filterRecentlySeenParticipants(participants, filterSeconds)
+                    .map { it.collectorId }
+                    .toSet()
                 expandedParticipantIds = expandedParticipantIds.intersect(existingIds)
                 seriesByParticipantId = seriesByParticipantId.filterKeys { it in existingIds }
                 seriesStatusByParticipantId = seriesStatusByParticipantId.filterKeys { it in existingIds }
@@ -128,6 +135,7 @@ fun main() {
             fun reloadExpandedSeries(windowSeconds: Long = seriesWindowSeconds) {
                 scope.launch {
                     state.participants
+                        .let { filterRecentlySeenParticipants(it, offlineFilterSeconds) }
                         .filter { it.collectorId in expandedParticipantIds }
                         .forEach { participant -> loadSeries(participant, windowSeconds) }
                 }
@@ -136,11 +144,12 @@ fun main() {
             suspend fun refresh() {
                 runCatching { api.lobby() }
                     .onSuccess { lobby ->
+                        val participants = lobby.participants
                         state = state.copy(
                             localStatus = if (useEnglishLabels) "Synced lobby snapshot" else "已同步服务端聚合数据",
-                            participants = lobby.participants,
+                            participants = participants,
                         )
-                        clearMissingExpandedParticipants()
+                        clearMissingExpandedParticipants(participants)
                     }
                     .onFailure { error ->
                         state = state.copy(
@@ -159,15 +168,17 @@ fun main() {
                     { data ->
                         runCatching { json.decodeFromString<LobbyEventEnvelope>(data) }
                             .onSuccess { event ->
+                                val participants = applyLobbyEvent(state.participants, event)
                                 state = state.copy(
                                     localStatus = if (useEnglishLabels) "Live lobby events connected" else "已连接实时事件",
-                                    participants = applyLobbyEvent(state.participants, event),
+                                    participants = participants,
                                 )
                                 scope.launch {
-                                    state.participants
+                                    participants
+                                        .let { filterRecentlySeenParticipants(it, offlineFilterSeconds) }
                                         .filter { it.collectorId in expandedParticipantIds }
                                         .forEach { participant -> loadSeries(participant) }
-                                    clearMissingExpandedParticipants()
+                                    clearMissingExpandedParticipants(participants)
                                 }
                             }
                     },
@@ -205,7 +216,7 @@ fun main() {
             }
 
             HeartwithScreen(
-                state = state,
+                state = state.copy(participants = visibleParticipants),
                 canCollect = false,
                 useEnglishLabels = useEnglishLabels,
                 expandedParticipantIds = expandedParticipantIds,
@@ -215,6 +226,11 @@ fun main() {
                 onSeriesWindowChange = { seconds ->
                     seriesWindowSeconds = seconds
                     reloadExpandedSeries(seconds)
+                },
+                offlineFilterSeconds = offlineFilterSeconds,
+                onOfflineFilterChange = { seconds ->
+                    offlineFilterSeconds = seconds
+                    clearMissingExpandedParticipants(filterSeconds = seconds)
                 },
                 onParticipantClick = { participant ->
                     scope.launch {
@@ -234,6 +250,17 @@ fun main() {
                 },
             )
         }
+    }
+}
+
+private fun filterRecentlySeenParticipants(
+    participants: List<Participant>,
+    filterSeconds: Long?,
+): List<Participant> {
+    if (filterSeconds == null) return participants
+    val cutoff = com.heartwith.shared.nowMs() - filterSeconds * 1000
+    return participants.filter { participant ->
+        participant.lastSeenMs?.let { it >= cutoff } == true
     }
 }
 

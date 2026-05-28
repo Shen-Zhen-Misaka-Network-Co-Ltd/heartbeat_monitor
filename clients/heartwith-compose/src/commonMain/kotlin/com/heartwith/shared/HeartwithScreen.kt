@@ -87,6 +87,8 @@ fun HeartwithScreen(
     seriesStatusByParticipantId: Map<String, String> = emptyMap(),
     seriesWindowSeconds: Long = 600,
     onSeriesWindowChange: (Long) -> Unit = {},
+    offlineFilterSeconds: Long? = 60 * 60,
+    onOfflineFilterChange: (Long?) -> Unit = {},
     onParticipantClick: (Participant) -> Unit = {},
     onStartCollect: () -> Unit,
     onRefresh: () -> Unit,
@@ -170,11 +172,13 @@ fun HeartwithScreen(
                 }
                 if (showLobby) {
                     item {
-                        SectionTitle(
+                        LobbyHeader(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .widthIn(max = 1280.dp),
-                            text = if (english) "Lobby" else "大厅",
+                            useEnglishLabels = english,
+                            offlineFilterSeconds = offlineFilterSeconds,
+                            onOfflineFilterChange = onOfflineFilterChange,
                         )
                     }
                     if (state.participants.isEmpty()) {
@@ -213,6 +217,36 @@ fun HeartwithScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LobbyHeader(
+    modifier: Modifier,
+    useEnglishLabels: Boolean,
+    offlineFilterSeconds: Long?,
+    onOfflineFilterChange: (Long?) -> Unit,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionTitle(text = if (useEnglishLabels) "Lobby" else "大厅")
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (useEnglishLabels) "Seen" else "上线",
+                fontSize = 12.sp,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            OfflineFilterOption.all.forEach { option ->
+                StatusTagButton(
+                    label = if (useEnglishLabels) option.englishLabel else option.zhLabel,
+                    selected = option.seconds == offlineFilterSeconds,
+                    onClick = { onOfflineFilterChange(option.seconds) },
+                )
             }
         }
     }
@@ -911,6 +945,21 @@ private data class SeriesWindowOption(
             SeriesWindowOption(10 * 60, "10 分钟", "10m"),
             SeriesWindowOption(60 * 60, "1 小时", "1h"),
             SeriesWindowOption(6 * 60 * 60, "6 小时", "6h"),
+        )
+    }
+}
+
+private data class OfflineFilterOption(
+    val seconds: Long?,
+    val zhLabel: String,
+    val englishLabel: String,
+) {
+    companion object {
+        val all = listOf(
+            OfflineFilterOption(10 * 60, "10 分钟", "10m"),
+            OfflineFilterOption(60 * 60, "1 小时", "1h"),
+            OfflineFilterOption(6 * 60 * 60, "6 小时", "6h"),
+            OfflineFilterOption(null, "全部", "All"),
         )
     }
 }

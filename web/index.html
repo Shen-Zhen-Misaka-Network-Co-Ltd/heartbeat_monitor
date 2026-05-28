@@ -66,6 +66,12 @@
       .metric-label { color: var(--muted); font-size: 14px; font-weight: 650; }
       .metric-value { margin-top: 6px; font-size: 30px; font-weight: 680; }
       h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }
+      .lobby-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+      .lobby-head h2 { margin: 0; }
+      .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; color: var(--muted); font-size: 13px; font-weight: 650; }
+      #seenFilters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+      .filters button { min-height: 32px; padding: 0 10px; border-radius: 10px; font-size: 13px; }
+      .filters button.active { background: var(--line); color: white; }
       .grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
@@ -153,7 +159,13 @@
         <div class="metric"><div class="metric-label" data-i18n="online">在线</div><div class="metric-value" id="onlineCount">0</div></div>
         <div class="metric"><div class="metric-label" data-i18n="total">全部</div><div class="metric-value" id="totalCount">0</div></div>
       </section>
-      <h2 data-i18n="lobby">大厅</h2>
+      <div class="lobby-head">
+        <h2 data-i18n="lobby">大厅</h2>
+        <div class="filters">
+          <span data-i18n="seen">上线</span>
+          <div id="seenFilters"></div>
+        </div>
+      </div>
       <section class="grid" id="grid"></section>
     </main>
     <script>
@@ -169,11 +181,13 @@
         polling: zh ? "实时事件断开，正在轮询" : "Live events disconnected; polling",
         online: zh ? "在线" : "Online",
         total: zh ? "全部" : "Total",
+        seen: zh ? "上线" : "Seen",
         trend: zh ? "心率趋势" : "Heart-rate trend",
         noSamples: zh ? "等待更多样本" : "Waiting for samples",
         last10: zh ? "10 分钟" : "10 min",
         last60: zh ? "1 小时" : "1 hour",
         last360: zh ? "6 小时" : "6 hours",
+        all: zh ? "全部" : "All",
         samples: zh ? "个样本" : "samples",
         avg: zh ? "平均" : "avg",
         min: zh ? "最低" : "min",
@@ -185,13 +199,15 @@
       };
       document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = text[el.dataset.i18n]; });
 
-      const state = { participants: [], expanded: new Set(), series: new Map(), windowSeconds: 600 };
+      const state = { participants: [], expanded: new Set(), series: new Map(), windowSeconds: 600, seenFilterSeconds: 3600 };
       const grid = document.getElementById("grid");
       const heroTitle = document.getElementById("heroTitle");
       const heroSub = document.getElementById("heroSub");
       const onlineCount = document.getElementById("onlineCount");
       const totalCount = document.getElementById("totalCount");
+      const seenFilters = document.getElementById("seenFilters");
       const ranges = [[600, text.last10], [3600, text.last60], [21600, text.last360]];
+      const seenRanges = [[600, "10m"], [3600, "1h"], [21600, "6h"], [null, text.all]];
 
       function relative(ms) {
         if (!ms) return "-";
@@ -206,6 +222,15 @@
         return new Date(ms).toLocaleTimeString(zh ? "zh-CN" : undefined, { hour: "2-digit", minute: "2-digit" });
       }
       function statusRank(status) { return status === "online" ? 0 : status === "stale" ? 1 : 2; }
+      function visibleParticipants() {
+        if (state.seenFilterSeconds == null) return state.participants;
+        const cutoff = Date.now() - state.seenFilterSeconds * 1000;
+        return state.participants.filter((p) => p.last_seen_ms && p.last_seen_ms >= cutoff);
+      }
+      function pruneExpanded(visible) {
+        const ids = new Set(visible.map((p) => p.collector_id));
+        state.expanded = new Set([...state.expanded].filter((id) => ids.has(id)));
+      }
       function sortParticipants(items) {
         return [...items].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.display_name.localeCompare(b.display_name));
       }
@@ -232,20 +257,30 @@
         render();
       }
       function render() {
-        const online = state.participants.filter((p) => p.status === "online").length;
+        const visible = visibleParticipants();
+        pruneExpanded(visible);
+        const online = visible.filter((p) => p.status === "online").length;
         onlineCount.textContent = online;
-        totalCount.textContent = state.participants.length;
-        const freshest = state.participants.find((p) => p.last_bpm != null);
+        totalCount.textContent = visible.length;
+        const freshest = visible.find((p) => p.last_bpm != null);
         heroTitle.textContent = freshest ? `${freshest.last_bpm} BPM` : text.waiting;
         grid.innerHTML = "";
-        if (state.participants.length === 0) {
+        seenFilters.innerHTML = "";
+        for (const [seconds, label] of seenRanges) {
+          const btn = document.createElement("button");
+          btn.textContent = label;
+          btn.className = seconds === state.seenFilterSeconds ? "active" : "";
+          btn.onclick = () => { state.seenFilterSeconds = seconds; render(); };
+          seenFilters.appendChild(btn);
+        }
+        if (visible.length === 0) {
           const empty = document.createElement("div");
           empty.className = "empty";
           empty.textContent = text.empty;
           grid.appendChild(empty);
           return;
         }
-        for (const p of state.participants) {
+        for (const p of visible) {
           const item = document.createElement("article");
           item.className = "item";
           const card = document.createElement("button");
