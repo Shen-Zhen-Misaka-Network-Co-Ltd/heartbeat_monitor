@@ -12,6 +12,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.FileInputStream;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -71,6 +72,9 @@ public final class MiHealthHookModule extends XposedModule {
     private final List<Object> launchModels = new ArrayList<>();
     private volatile Context appContext;
     private volatile Object hrCallback;
+    private volatile Object huamiControllerCallback;
+    private volatile WeakReference<Object> huamiHrController = new WeakReference<>(null);
+    private volatile WeakReference<Object> huamiBleDevice = new WeakReference<>(null);
     private volatile boolean started;
     private volatile long lastStartAt;
     private volatile String lastStartReason = "";
@@ -204,13 +208,19 @@ public final class MiHealthHookModule extends XposedModule {
         hookEcoRawHandler(classLoader);
         hookEcoRemoteDataHandler(classLoader);
         hookLegacyHuamiHeartRateProfile(classLoader);
+        hookOriginalHuamiHeartRateController(classLoader);
+        hookOriginalHuamiBleDevice(classLoader);
         hookLaunchSportModel(classLoader, "com.xiaomi.fitness.sport_eco.model.LaunchSportModel");
         hookLaunchSportModel(classLoader, "com.xiaomi.fitness.sport.model.LaunchSportModel");
         hookLaunchViewBean(classLoader, "com.xiaomi.fitness.sport_eco.bean.LaunchViewBean");
         hookLaunchViewBean(classLoader, "com.xiaomi.fitness.sport.bean.LaunchViewBean");
         hookHuamiCallback(classLoader, "com.xiaomi.fitness.sport_eco.model.LaunchSportModel$HuamiHrImpl");
+        hookHuamiCallback(classLoader, "com.xiaomi.fitness.sport_eco_manager.model.LaunchSportModel$HuamiHrImpl");
         hookHuamiCallback(classLoader, "com.xiaomi.fitness.sport.model.LaunchSportModel$HuamiHrImpl");
+        hookHuamiCallback(classLoader, "com.xiaomi.fitness.sport_manager.model.LaunchSportModel$HuamiHrImpl");
         hookHuamiCallback(classLoader, "com.xiaomi.fitness.sport_eco_manager.state.data.HuamiDataReceive");
+        hookHuamiCallback(classLoader, "auu");
+        hookHuamiCallback(classLoader, "com.xiaomi.hm.health.bt.sdk.HuamiDevice$y");
         hookHuamiCallback(classLoader, "com.xiaomi.fit.device.huami.HuaMiApiCallerImpl$startRealtimeMeasureHr$1");
         hookHuamiCallback(classLoader, "com.xiaomi.wearable.HuamiApiImpl$startRealtimeMeasureHr$1");
     }
@@ -364,7 +374,7 @@ public final class MiHealthHookModule extends XposedModule {
         hook(method).intercept(new XposedInterface.Hooker() {
             @Override
             public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                final String source = "legacy-huami";
+                final String source = "twu." + methodName;
                 if (shouldIgnoreSource(source)) {
                     return chain.proceed();
                 }
@@ -378,6 +388,110 @@ public final class MiHealthHookModule extends XposedModule {
                 return chain.proceed();
             }
         });
+    }
+
+    private void hookOriginalHuamiHeartRateController(final ClassLoader classLoader) {
+        try {
+            final Class<?> controllerClass = findClass("buu", classLoader);
+            final Class<?> callbackClass = findClass("buu$b", classLoader);
+            Method start = controllerClass.getDeclaredMethod("b", callbackClass);
+            Method stop = controllerClass.getDeclaredMethod("g");
+            start.setAccessible(true);
+            stop.setAccessible(true);
+
+            for (Constructor<?> constructor : controllerClass.getDeclaredConstructors()) {
+                constructor.setAccessible(true);
+                hook(constructor).intercept(new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        rememberHuamiController(chain.getThisObject());
+                        return result;
+                    }
+                });
+            }
+
+            hook(start).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    rememberHuamiController(chain.getThisObject());
+                    return chain.proceed();
+                }
+            });
+
+            hook(stop).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    rememberHuamiController(chain.getThisObject());
+                    return chain.proceed();
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void hookOriginalHuamiBleDevice(final ClassLoader classLoader) {
+        try {
+            final Class<?> deviceClass = findClass("me", classLoader);
+            final Class<?> callbackClass = findClass("buu$b", classLoader);
+            Method getController = deviceClass.getDeclaredMethod("f1");
+            Method startRealtime = deviceClass.getDeclaredMethod("i1", callbackClass);
+            Method stopRealtime = deviceClass.getDeclaredMethod("h1");
+            getController.setAccessible(true);
+            startRealtime.setAccessible(true);
+            stopRealtime.setAccessible(true);
+
+            for (Constructor<?> constructor : deviceClass.getDeclaredConstructors()) {
+                constructor.setAccessible(true);
+                hook(constructor).intercept(new XposedInterface.Hooker() {
+                    @Override
+                    public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        rememberHuamiBleDevice(chain.getThisObject());
+                        return result;
+                    }
+                });
+            }
+
+            hook(getController).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    rememberHuamiBleDevice(chain.getThisObject());
+                    Object result = chain.proceed();
+                    rememberHuamiController(result);
+                    return result;
+                }
+            });
+
+            hook(startRealtime).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    rememberHuamiBleDevice(chain.getThisObject());
+                    return chain.proceed();
+                }
+            });
+
+            hook(stopRealtime).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    rememberHuamiBleDevice(chain.getThisObject());
+                    return chain.proceed();
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void rememberHuamiController(Object controller) {
+        if (controller != null) {
+            huamiHrController = new WeakReference<>(controller);
+        }
+    }
+
+    private void rememberHuamiBleDevice(Object device) {
+        if (device != null) {
+            huamiBleDevice = new WeakReference<>(device);
+        }
     }
 
     private void hookLaunchSportModel(ClassLoader classLoader, final String className) {
@@ -454,9 +568,11 @@ public final class MiHealthHookModule extends XposedModule {
                 try {
                     lastStartAt = SystemClock.elapsedRealtime();
                     lastStartReason = reason;
+                    boolean originalDeviceStarted = startOriginalHuamiBleDevice(classLoader);
+                    boolean originalControllerStarted = startOriginalHuamiController(classLoader);
                     boolean registered = ensureLaunchModels(classLoader);
                     boolean deviceStarted = startDeviceRealtimeHr(classLoader);
-                    started = registered || deviceStarted;
+                    started = originalDeviceStarted || originalControllerStarted || registered || deviceStarted;
                     scheduleRetryIfNeeded(classLoader);
                 } catch (Throwable throwable) {
                     logLine("start failed: " + throwable.getClass().getSimpleName());
@@ -526,6 +642,34 @@ public final class MiHealthHookModule extends XposedModule {
         return ok;
     }
 
+    private boolean startOriginalHuamiBleDevice(ClassLoader classLoader) {
+        Object device = huamiBleDevice.get();
+        if (device == null) {
+            return false;
+        }
+        try {
+            Object callback = getOrCreateHuamiControllerCallback(classLoader);
+            callMethod(device, "i1", callback);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean startOriginalHuamiController(ClassLoader classLoader) {
+        Object controller = huamiHrController.get();
+        if (controller == null) {
+            return false;
+        }
+        try {
+            Object callback = getOrCreateHuamiControllerCallback(classLoader);
+            callMethod(controller, "b", callback);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private boolean startDeviceRealtimeHr(ClassLoader classLoader) {
         Object device = getCurrentDeviceModel(classLoader);
         if (device == null) {
@@ -542,6 +686,7 @@ public final class MiHealthHookModule extends XposedModule {
                 Class<?> helperClass = findClass(helperClassName, classLoader);
                 callStaticMethod(helperClass, "startDeviceHr", device, callback);
                 startedAny = true;
+                break;
             } catch (Throwable ignored) {
             }
         }
@@ -590,6 +735,39 @@ public final class MiHealthHookModule extends XposedModule {
             }
         });
         hrCallback = callback;
+        return callback;
+    }
+
+    private Object getOrCreateHuamiControllerCallback(ClassLoader classLoader) throws Exception {
+        Object callback = huamiControllerCallback;
+        if (callback != null) {
+            return callback;
+        }
+        Class<?> callbackClass = findClass("buu$b", classLoader);
+        callback = Proxy.newProxyInstance(classLoader, new Class<?>[]{callbackClass}, new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) {
+                String name = method.getName();
+                if ("toString".equals(name)) {
+                    return "HeartwithMiHealthHuamiCallback";
+                }
+                if ("hashCode".equals(name)) {
+                    return System.identityHashCode(proxy);
+                }
+                if ("equals".equals(name)) {
+                    return args != null && args.length > 0 && proxy == args[0];
+                }
+                if ("onHeartRateChanged".equals(name) && args != null && args.length > 0) {
+                    final String source = "huami-controller-proxy";
+                    if (!shouldIgnoreSource(source)) {
+                        onHeartRate(((Number) args[0]).intValue(), source);
+                    }
+                    return null;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        huamiControllerCallback = callback;
         return callback;
     }
 

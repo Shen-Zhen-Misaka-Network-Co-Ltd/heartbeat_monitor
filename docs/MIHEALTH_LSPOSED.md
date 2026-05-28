@@ -10,8 +10,12 @@
 - `LaunchSportModel.setHeartHr(int)`。
 - `LaunchViewBean.setHeartRate(String)`。
 - 部分 Huami `onHeartRateChanged(int)` 回调。
+- 老 Huami 设备链路：
+  - `twu.e(byte[])` / `twu.i(byte[])` 原始实时心率包，心率位于 `data[1]`。
+  - `me.i1(...)` / `buu.b(...)` 对应的原始 Huami 实时测量启动入口。
+  - `auu`、`HuamiDevice$y` 等老回调类的 `onHeartRateChanged(int)`。
 
-模块会在小米运动健康进程 attach 后尝试调用原有 `startDeviceHr(...)` / `registerDeviceHr()` 链路。它不会扫描 BLE，也不会直接连接手环。
+模块会在小米运动健康进程 attach 后尝试调用原有 `startDeviceHr(...)` / `registerDeviceHr()` 链路；如果捕获到老 Huami 设备对象，也会复用小米健康已有对象调用原始实时测量入口。它不会扫描 BLE，也不会直接连接手环。
 
 ## 上传协议
 
@@ -55,6 +59,7 @@ LSPosed 分支的 `client_platform` 为 `android-lsposed`，`device_model` 为 `
 - 不再向小米健康 UI 注入悬浮心率点。
 - 不 hook `Activity.onResume/onPause`，只 hook `Application.attach` 和心率数据链路。
 - 主进程只接收配置广播，不安装心率解析 hook。
+- `startDeviceHr(...)` 只要有一个 helper 调用成功就停止继续尝试，避免重复打开实时心率链路。
 - 上传采用最多 `8s` 批量窗口，失败后退避重试，日志按分钟节流。
 
 ## 构建
