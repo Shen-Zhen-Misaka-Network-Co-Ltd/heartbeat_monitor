@@ -6,6 +6,10 @@ android {
     namespace = "com.heartwith.mihealth.lsp"
     compileSdk = 37
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.heartwith.mihealth.lsp"
         minSdk = 23
@@ -31,8 +35,10 @@ android {
     buildTypes {
         getByName("release") {
             signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Xposed/NPatch discovers entry points and hooks through reflection.
+            // Keep release bytecode unminified; verbose logs are still gated by BuildConfig.DEBUG.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -43,4 +49,5 @@ android {
 
 dependencies {
     compileOnly("io.github.libxposed:api:101.0.0")
+    compileOnly(project(":xposed-api-stub"))
 }
