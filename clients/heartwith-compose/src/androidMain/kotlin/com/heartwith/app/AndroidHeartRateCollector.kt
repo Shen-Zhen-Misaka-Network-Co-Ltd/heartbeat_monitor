@@ -571,7 +571,7 @@ class AndroidHeartRateCollector(
             }
         }
         @Suppress("DEPRECATION")
-        currentGatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        currentGatt = device.connectGatt(context, true, callback, BluetoothDevice.TRANSPORT_LE)
         scope.launch {
             delay(CONNECTION_TIMEOUT_MS)
             val gatt = currentGatt
