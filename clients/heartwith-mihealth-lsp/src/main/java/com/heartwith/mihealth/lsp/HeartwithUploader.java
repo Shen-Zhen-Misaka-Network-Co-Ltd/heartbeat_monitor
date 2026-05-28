@@ -2,6 +2,7 @@ package com.heartwith.mihealth.lsp;
 
 import android.content.Context;
 import android.database.Cursor;
+import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -14,6 +15,7 @@ import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.concurrent.Executor;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,7 +25,8 @@ final class HeartwithUploader {
     private static final String KEY_CACHED_ENABLED = "cached_enabled";
     private static final String KEY_CACHED_SERVER_URL = "cached_server_url";
     private static final String KEY_CACHED_DISPLAY_NAME = "cached_display_name";
-    private static final String DEVICE_MODEL = "Xiaomi Health Hook";
+    private static final String KEY_CACHED_DEVICE_MODEL = "cached_device_model";
+    private static final String DEFAULT_DEVICE_MODEL = "Xiaomi Health Hook";
     private static final String CLIENT_PLATFORM = "android-lsposed";
     private static final String APP_VERSION = "0.1.0";
     private static final long BATCH_WINDOW_MS = 8_000L;
@@ -34,8 +37,10 @@ final class HeartwithUploader {
     private static final Pattern COLLECTOR_ID = Pattern.compile("\"collector_id\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern COLLECTOR_TOKEN = Pattern.compile("\"collector_token\"\\s*:\\s*\"([^\"]+)\"");
 
+    private final Executor worker;
     private final ArrayDeque<Sample> samples = new ArrayDeque<>();
     private HeartwithSettings settings = new HeartwithSettings(true, HeartwithSettings.DEFAULT_SERVER_URL, "Android");
+    private String deviceModel = DEFAULT_DEVICE_MODEL;
     private Session session;
     private long lastSettingsReadMs;
     private boolean settingsLoaded;
@@ -48,6 +53,11 @@ final class HeartwithUploader {
     private int lastUploadedBpm = -1;
     private boolean uploadInFlight;
     private boolean runtimeCacheLoaded;
+    private boolean delayedFlushScheduled;
+
+    HeartwithUploader(Executor worker) {
+        this.worker = worker;
+    }
 
     synchronized void warmUp(Context context) {
         refreshSettingsIfNeeded(context, true);
@@ -66,6 +76,21 @@ final class HeartwithUploader {
         logSettings(reason);
     }
 
+    synchronized boolean setDeviceModel(Context context, String model) {
+        String next = sanitizeDeviceModel(model);
+        if (next.equals(deviceModel)) {
+            return false;
+        }
+        deviceModel = next;
+        session = null;
+        seq = 1;
+        persistDeviceModel(context, next);
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "device model resolved: " + next);
+        }
+        return true;
+    }
+
     synchronized void onHeartRate(Context context, int bpm, String source) {
         if (bpm < 30 || bpm > 240) {
             return;
@@ -74,6 +99,7 @@ final class HeartwithUploader {
         samples.addLast(new Sample(now, bpm, source));
         trim(now);
         if (!shouldFlush(now, bpm) || uploadInFlight || now < nextUploadAttemptMs) {
+            scheduleDelayedFlush(context);
             return;
         }
         uploadInFlight = true;
@@ -81,6 +107,58 @@ final class HeartwithUploader {
             refreshSettingsIfNeeded(context, false);
             if (!settingsLoaded) {
                 logState("settings unavailable; keep samples cached");
+                return;
+            }
+            if (settings.enabled) {
+                uploadLocked();
+            } else {
+                samples.clear();
+                session = null;
+            }
+        } finally {
+            uploadInFlight = false;
+        }
+    }
+
+    private void scheduleDelayedFlush(final Context context) {
+        if (context == null || delayedFlushScheduled || samples.isEmpty()) {
+            return;
+        }
+        delayedFlushScheduled = true;
+        try {
+            new Handler(context.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    worker.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            flushDelayed(context);
+                        }
+                    });
+                }
+            }, MAX_BATCH_WINDOW_MS);
+        } catch (Throwable ignored) {
+            delayedFlushScheduled = false;
+        }
+    }
+
+    private synchronized void flushDelayed(Context context) {
+        delayedFlushScheduled = false;
+        long now = System.currentTimeMillis();
+        trim(now);
+        if (samples.isEmpty()) {
+            return;
+        }
+        if (uploadInFlight || now < nextUploadAttemptMs) {
+            scheduleDelayedFlush(context);
+            return;
+        }
+        uploadInFlight = true;
+        try {
+            refreshSettingsIfNeeded(context, false);
+            if (!settingsLoaded) {
+                logState("settings unavailable; keep delayed samples cached");
+                scheduleDelayedFlush(context);
                 return;
             }
             if (settings.enabled) {
@@ -160,9 +238,23 @@ final class HeartwithUploader {
             }
             boolean enabled = prefs.getBoolean(KEY_CACHED_ENABLED, true);
             String displayName = prefs.getString(KEY_CACHED_DISPLAY_NAME, "Android");
+            deviceModel = sanitizeDeviceModel(prefs.getString(KEY_CACHED_DEVICE_MODEL, DEFAULT_DEVICE_MODEL));
             settings = new HeartwithSettings(enabled, serverUrl, displayName);
             settingsLoaded = true;
             logSettings("settings cache loaded");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void persistDeviceModel(Context context, String model) {
+        if (context == null) {
+            return;
+        }
+        try {
+            context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_CACHED_DEVICE_MODEL, sanitizeDeviceModel(model))
+                    .apply();
         } catch (Throwable ignored) {
         }
     }
@@ -186,7 +278,7 @@ final class HeartwithUploader {
                 return;
             }
             int sampleCount = samples.size();
-            byte[] body = buildBatchCbor(session.collectorId, seq, settings.displayName, DEVICE_MODEL);
+            byte[] body = buildBatchCbor(session.collectorId, seq, settings.displayName, deviceModel);
             Response response = post(
                     settings.serverUrl + "/api/v1/hr/batches",
                     "application/cbor",
@@ -218,6 +310,9 @@ final class HeartwithUploader {
     }
 
     private void logState(String message) {
+        if (!BuildConfig.DEBUG) {
+            return;
+        }
         long elapsed = SystemClock.elapsedRealtime();
         if (lastFailureLogElapsedMs > 0L && elapsed - lastFailureLogElapsedMs < 60_000L) {
             return;
@@ -227,6 +322,9 @@ final class HeartwithUploader {
     }
 
     private void logSettings(String prefix) {
+        if (!BuildConfig.DEBUG) {
+            return;
+        }
         long elapsed = SystemClock.elapsedRealtime();
         if (lastSettingsLogElapsedMs > 0L && elapsed - lastSettingsLogElapsedMs < 60_000L) {
             return;
@@ -235,10 +333,14 @@ final class HeartwithUploader {
         Log.i(TAG, prefix + ": loaded=" + settingsLoaded
                 + ", enabled=" + settings.enabled
                 + ", server=" + settings.serverUrl
-                + ", display=" + settings.displayName);
+                + ", display=" + settings.displayName
+                + ", device=" + deviceModel);
     }
 
     private void logUploadSuccess(int sampleCount) {
+        if (!BuildConfig.DEBUG) {
+            return;
+        }
         long elapsed = SystemClock.elapsedRealtime();
         if (lastUploadSuccessLogElapsedMs > 0L && elapsed - lastUploadSuccessLogElapsedMs < 60_000L) {
             return;
@@ -253,7 +355,7 @@ final class HeartwithUploader {
         }
         String json = "{"
                 + "\"display_name\":\"" + escapeJson(settings.displayName) + "\","
-                + "\"device_model\":\"" + DEVICE_MODEL + "\","
+                + "\"device_model\":\"" + escapeJson(deviceModel) + "\","
                 + "\"client_platform\":\"" + CLIENT_PLATFORM + "\","
                 + "\"app_version\":\"" + APP_VERSION + "\""
                 + "}";
@@ -271,7 +373,9 @@ final class HeartwithUploader {
             throw new IllegalStateException("session response missing credentials");
         }
         session = new Session(collectorId, token);
-        Log.i(TAG, "session created: collector=" + collectorId);
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "session created: collector=" + collectorId + ", device=" + deviceModel);
+        }
     }
 
     private Response post(String url, String contentType, byte[] body, String authorization) throws Exception {
@@ -404,6 +508,23 @@ final class HeartwithUploader {
 
     private String escapeJson(String value) {
         return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private String sanitizeDeviceModel(String value) {
+        if (value == null) {
+            return DEFAULT_DEVICE_MODEL;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return DEFAULT_DEVICE_MODEL;
+        }
+        String lower = trimmed.toLowerCase();
+        if (lower.startsWith("com.") || lower.startsWith("lcom/") ||
+                lower.contains(".manager.") || lower.contains(".device.") ||
+                lower.contains("/") || lower.contains("@")) {
+            return DEFAULT_DEVICE_MODEL;
+        }
+        return trimmed.length() > 80 ? trimmed.substring(0, 80) : trimmed;
     }
 
     private static final class Session {

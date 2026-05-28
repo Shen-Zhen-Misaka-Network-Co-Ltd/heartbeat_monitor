@@ -26,8 +26,12 @@ public final class SettingsProvider extends ContentProvider {
                     HeartwithStatus.KEY_LAST_BPM,
                     HeartwithStatus.KEY_LAST_SOURCE,
                     HeartwithStatus.KEY_LAST_SEEN_MS,
+                    HeartwithStatus.KEY_VIEWER_ACTIVE_UNTIL_MS,
             });
-            cursor.addRow(new Object[]{status.bpm, status.source, status.seenMs});
+            long viewerActiveUntilMs = getContext()
+                    .getSharedPreferences(HeartwithSettings.PREFS, Context.MODE_PRIVATE)
+                    .getLong(HeartwithStatus.KEY_VIEWER_ACTIVE_UNTIL_MS, 0L);
+            cursor.addRow(new Object[]{status.bpm, status.source, status.seenMs, viewerActiveUntilMs});
             return cursor;
         }
         HeartwithSettings settings = HeartwithSettings.readLocal(getContext());
