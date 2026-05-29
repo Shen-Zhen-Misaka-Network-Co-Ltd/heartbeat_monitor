@@ -47,5 +47,5 @@ jobs:
         with:
           files: |
             clients/heartwith-compose/build/outputs/apk/release/Heartwith-*-release.apk
-            clients/heartwith-mihealth-lsp/build/outputs/apk/release/*.apk
+            clients/heartwith-mihealth-lsp/build/outputs/apk/release/Heartwith-*-release.apk
           generate_release_notes: true
