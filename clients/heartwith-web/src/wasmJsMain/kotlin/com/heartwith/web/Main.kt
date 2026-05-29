@@ -50,6 +50,33 @@ private external fun openLobbyEvents(
 @JsFun("() => navigator.language || ''")
 private external fun browserLanguage(): String
 
+@OptIn(ExperimentalWasmJsInterop::class)
+@JsFun(
+    """
+    (key) => {
+        try {
+            return localStorage.getItem(key) || '';
+        } catch (_) {
+            return '';
+        }
+    }
+    """,
+)
+private external fun readLocalStorage(key: String): String
+
+@OptIn(ExperimentalWasmJsInterop::class)
+@JsFun(
+    """
+    (key, value) => {
+        try {
+            localStorage.setItem(key, value);
+        } catch (_) {
+        }
+    }
+    """,
+)
+private external fun writeLocalStorage(key: String, value: String)
+
 @OptIn(
     ExperimentalComposeUiApi::class,
     ExperimentalWasmJsInterop::class,
@@ -74,6 +101,9 @@ fun main() {
             var seriesWindowSeconds by remember { mutableStateOf(10 * 60L) }
             var offlineFilterSeconds by remember { mutableStateOf<Long?>(60 * 60L) }
             var renderClockMs by remember { mutableStateOf(com.heartwith.shared.nowMs()) }
+            var participantOrderIds by remember {
+                mutableStateOf(readParticipantOrder())
+            }
             var state by remember {
                 mutableStateOf(
                     HeartwithUiState(
@@ -85,18 +115,26 @@ fun main() {
                 )
             }
             val latestState by rememberUpdatedState(state)
+            val latestParticipantOrderIds by rememberUpdatedState(participantOrderIds)
             val displayParticipants = state.participants.map { participant ->
                 participant
                     .withLatestSeriesSample(seriesByParticipantId[participant.collectorId].orEmpty())
                     .withLiveStatus(renderClockMs)
             }
-            val visibleParticipants = sortParticipantsForDisplay(
+            val visibleParticipants = stableParticipantsForDisplay(
                 filterRecentlySeenParticipants(
                     displayParticipants,
                     offlineFilterSeconds,
                     renderClockMs,
                 ),
+                participantOrderIds,
             )
+
+            fun updateParticipantOrder(next: List<String>) {
+                if (next == latestParticipantOrderIds) return
+                participantOrderIds = next
+                writeParticipantOrder(next)
+            }
 
             fun seriesWindowLabel(windowSeconds: Long): String =
                 when (windowSeconds) {
@@ -193,6 +231,7 @@ fun main() {
                 runCatching { api.lobby() }
                     .onSuccess { lobby ->
                         val participants = lobby.participants
+                        updateParticipantOrder(reconcileParticipantOrder(latestParticipantOrderIds, participants))
                         state = state.copy(
                             localStatus = if (useEnglishLabels) "Synced lobby snapshot" else "已同步服务端聚合数据",
                             participants = participants,
@@ -217,6 +256,7 @@ fun main() {
                         runCatching { json.decodeFromString<LobbyEventEnvelope>(data) }
                             .onSuccess { event ->
                                 val participants = applyLobbyEvent(latestState.participants, event)
+                                updateParticipantOrder(reconcileParticipantOrder(latestParticipantOrderIds, participants))
                                 state = state.copy(
                                     localStatus = if (useEnglishLabels) "Live lobby events connected" else "已连接实时事件",
                                     participants = participants,
@@ -286,6 +326,17 @@ fun main() {
                         }
                     }
                 },
+                onParticipantMove = { collectorId, delta ->
+                    updateParticipantOrder(
+                        moveParticipantOrder(
+                            currentOrderIds = participantOrderIds,
+                            allParticipants = displayParticipants,
+                            visibleParticipants = visibleParticipants,
+                            collectorId = collectorId,
+                            delta = delta,
+                        ),
+                    )
+                },
                 onStartCollect = {},
                 onRefresh = {
                     scope.launch {
@@ -330,10 +381,82 @@ private fun Participant.withLiveStatus(currentMs: Long): Participant {
     return if (status == liveStatus) this else copy(status = liveStatus)
 }
 
-private fun sortParticipantsForDisplay(participants: List<Participant>): List<Participant> =
+private const val ParticipantOrderStorageKey = "heartwith.participant.order.v1"
+
+private fun readParticipantOrder(): List<String> =
+    readLocalStorage(ParticipantOrderStorageKey)
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .toList()
+
+private fun writeParticipantOrder(orderIds: List<String>) {
+    writeLocalStorage(ParticipantOrderStorageKey, orderIds.distinct().joinToString("\n"))
+}
+
+private fun stableParticipantsForDisplay(
+    participants: List<Participant>,
+    orderIds: List<String>,
+): List<Participant> {
+    if (orderIds.isEmpty()) return defaultParticipantsForDisplay(participants)
+    val byId = participants.associateBy { it.collectorId }
+    val ordered = orderIds.mapNotNull { byId[it] }
+    val orderedIds = ordered.map { it.collectorId }.toSet()
+    val remaining = defaultParticipantsForDisplay(participants.filterNot { it.collectorId in orderedIds })
+    return ordered + remaining
+}
+
+private fun reconcileParticipantOrder(
+    currentOrderIds: List<String>,
+    participants: List<Participant>,
+): List<String> {
+    val presentIds = participants.map { it.collectorId }.toSet()
+    val current = currentOrderIds.filter { it in presentIds }.distinct()
+    val currentSet = current.toSet()
+    val missing = defaultParticipantsForDisplay(participants.filterNot { it.collectorId in currentSet })
+        .map { it.collectorId }
+    return current + missing
+}
+
+private fun moveParticipantOrder(
+    currentOrderIds: List<String>,
+    allParticipants: List<Participant>,
+    visibleParticipants: List<Participant>,
+    collectorId: String,
+    delta: Int,
+): List<String> {
+    if (delta == 0 || visibleParticipants.size < 2) {
+        return reconcileParticipantOrder(currentOrderIds, allParticipants)
+    }
+    val visibleIds = visibleParticipants.map { it.collectorId }
+    val fromVisibleIndex = visibleIds.indexOf(collectorId)
+    if (fromVisibleIndex < 0) {
+        return reconcileParticipantOrder(currentOrderIds, allParticipants)
+    }
+    val toVisibleIndex = (fromVisibleIndex + delta).coerceIn(0, visibleIds.lastIndex)
+    if (toVisibleIndex == fromVisibleIndex) {
+        return reconcileParticipantOrder(currentOrderIds, allParticipants)
+    }
+    val targetId = visibleIds[toVisibleIndex]
+    val fullOrder = reconcileParticipantOrder(currentOrderIds, allParticipants).toMutableList()
+    fullOrder.remove(collectorId)
+    val targetIndex = fullOrder.indexOf(targetId)
+    if (targetIndex < 0) {
+        fullOrder.add(collectorId)
+        return fullOrder
+    }
+    val insertIndex = if (delta > 0) targetIndex + 1 else targetIndex
+    fullOrder.add(insertIndex.coerceIn(0, fullOrder.size), collectorId)
+    return fullOrder
+}
+
+private fun defaultParticipantsForDisplay(participants: List<Participant>): List<Participant> =
     participants.sortedWith(
         compareBy<Participant> { statusRank(it.status) }
-            .thenBy { it.displayName },
+            .thenBy { it.displayName.lowercase() }
+            .thenBy { it.deviceModel.lowercase() }
+            .thenBy { it.collectorId },
     )
 
 private fun statusRank(status: String): Int =
@@ -361,7 +484,7 @@ private fun applyLobbyEvent(
     event: LobbyEventEnvelope,
 ): List<Participant> =
     when (event.type) {
-        "snapshot" -> event.participants.sortedBy { it.displayName }
+        "snapshot" -> event.participants
         "participant_update" -> {
             val participant = event.participant ?: return current
             val next = current
@@ -370,7 +493,7 @@ private fun applyLobbyEvent(
                         it.displayName == participant.displayName
                 }
                 .plus(participant)
-            next.sortedWith(compareBy<Participant> { it.status == "offline" }.thenBy { it.displayName })
+            next
         }
         else -> current
     }
