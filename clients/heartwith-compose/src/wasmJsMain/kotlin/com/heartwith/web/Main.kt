@@ -20,6 +20,7 @@ import com.heartwith.shared.Participant
 import com.heartwith.shared.SeriesSample
 import kotlin.js.ExperimentalWasmJsInterop
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.jetbrains.compose.resources.FontResource
@@ -72,6 +73,7 @@ fun main() {
             var seriesLoadedAtByParticipantId by remember { mutableStateOf(emptyMap<String, Long>()) }
             var seriesWindowSeconds by remember { mutableStateOf(10 * 60L) }
             var offlineFilterSeconds by remember { mutableStateOf<Long?>(60 * 60L) }
+            var renderClockMs by remember { mutableStateOf(com.heartwith.shared.nowMs()) }
             var state by remember {
                 mutableStateOf(
                     HeartwithUiState(
@@ -83,7 +85,18 @@ fun main() {
                 )
             }
             val latestState by rememberUpdatedState(state)
-            val visibleParticipants = filterRecentlySeenParticipants(state.participants, offlineFilterSeconds)
+            val displayParticipants = state.participants.map { participant ->
+                participant
+                    .withLatestSeriesSample(seriesByParticipantId[participant.collectorId].orEmpty())
+                    .withLiveStatus(renderClockMs)
+            }
+            val visibleParticipants = sortParticipantsForDisplay(
+                filterRecentlySeenParticipants(
+                    displayParticipants,
+                    offlineFilterSeconds,
+                    renderClockMs,
+                ),
+            )
 
             fun seriesWindowLabel(windowSeconds: Long): String =
                 when (windowSeconds) {
@@ -229,6 +242,22 @@ fun main() {
                 }
             }
 
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(5_000L)
+                    renderClockMs = com.heartwith.shared.nowMs()
+                }
+            }
+
+            LaunchedEffect(expandedParticipantIds, seriesWindowSeconds, offlineFilterSeconds) {
+                while (true) {
+                    delay(15_000L)
+                    if (expandedParticipantIds.isNotEmpty()) {
+                        reloadExpandedSeries(seriesWindowSeconds)
+                    }
+                }
+            }
+
             HeartwithScreen(
                 state = state.copy(participants = visibleParticipants),
                 canCollect = false,
@@ -271,13 +300,48 @@ fun main() {
 private fun filterRecentlySeenParticipants(
     participants: List<Participant>,
     filterSeconds: Long?,
+    currentMs: Long = com.heartwith.shared.nowMs(),
 ): List<Participant> {
     if (filterSeconds == null) return participants
-    val cutoff = com.heartwith.shared.nowMs() - filterSeconds * 1000
+    val cutoff = currentMs - filterSeconds * 1000
     return participants.filter { participant ->
         participant.lastSeenMs?.let { it >= cutoff } == true
     }
 }
+
+private fun Participant.withLatestSeriesSample(samples: List<SeriesSample>): Participant {
+    val latest = samples.maxByOrNull { it.tMs } ?: return this
+    val currentLastSeen = lastSeenMs ?: Long.MIN_VALUE
+    return if (latest.tMs >= currentLastSeen) {
+        copy(lastBpm = latest.bpm, lastSeenMs = latest.tMs)
+    } else {
+        this
+    }
+}
+
+private fun Participant.withLiveStatus(currentMs: Long): Participant {
+    val lastSeen = lastSeenMs ?: return copy(status = "offline")
+    val ageMs = currentMs - lastSeen
+    val liveStatus = when {
+        ageMs <= 20_000L -> "online"
+        ageMs <= 120_000L -> "stale"
+        else -> "offline"
+    }
+    return if (status == liveStatus) this else copy(status = liveStatus)
+}
+
+private fun sortParticipantsForDisplay(participants: List<Participant>): List<Participant> =
+    participants.sortedWith(
+        compareBy<Participant> { statusRank(it.status) }
+            .thenBy { it.displayName },
+    )
+
+private fun statusRank(status: String): Int =
+    when (status) {
+        "online" -> 0
+        "stale" -> 1
+        else -> 2
+    }
 
 @OptIn(InternalResourceApi::class)
 private val heartwithCjkFont = FontResource(

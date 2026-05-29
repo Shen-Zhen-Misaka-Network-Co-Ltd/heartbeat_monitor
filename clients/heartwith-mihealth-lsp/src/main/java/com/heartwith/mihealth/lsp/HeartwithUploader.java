@@ -28,7 +28,6 @@ final class HeartwithUploader {
     private static final String KEY_CACHED_DEVICE_MODEL = "cached_device_model";
     private static final String DEFAULT_DEVICE_MODEL = "Xiaomi Health Hook";
     private static final String CLIENT_PLATFORM = "android-lsposed";
-    private static final String APP_VERSION = "0.1.0";
     private static final long BATCH_WINDOW_MS = 8_000L;
     private static final long MAX_BATCH_WINDOW_MS = 8_000L;
     private static final long OFFLINE_CACHE_MS = 300_000L;
@@ -357,7 +356,7 @@ final class HeartwithUploader {
                 + "\"display_name\":\"" + escapeJson(settings.displayName) + "\","
                 + "\"device_model\":\"" + escapeJson(deviceModel) + "\","
                 + "\"client_platform\":\"" + CLIENT_PLATFORM + "\","
-                + "\"app_version\":\"" + APP_VERSION + "\""
+                + "\"app_version\":\"" + BuildConfig.VERSION_NAME + "\""
                 + "}";
         Response response = post(
                 settings.serverUrl + "/api/v1/collector/sessions",
@@ -379,18 +378,65 @@ final class HeartwithUploader {
     }
 
     private Response post(String url, String contentType, byte[] body, String authorization) throws Exception {
-        if (url.startsWith("http://")) {
+        try {
+            return urlConnectionPost(url, contentType, body, authorization);
+        } catch (Exception throwable) {
+            if (!shouldFallbackToRawHttp(url, throwable)) {
+                throw throwable;
+            }
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "fallback raw http post: " + throwable.getClass().getSimpleName() + ": " + throwable.getMessage(), throwable);
+            }
             return rawHttpPost(url, contentType, body, authorization);
         }
-        HttpURLConnection connection = open(url, "POST", contentType);
+    }
+
+    private Response urlConnectionPost(String url, String contentType, byte[] body, String authorization) throws Exception {
+        boolean cleartext = url.startsWith("http://");
+        if (cleartext) {
+            HeartwithCleartextScope.enter();
+        }
+        try {
+            HttpURLConnection connection = open(url, "POST", contentType);
+            return execute(connection, body, authorization);
+        } finally {
+            if (cleartext) {
+                HeartwithCleartextScope.exit();
+            }
+        }
+    }
+
+    private Response execute(HttpURLConnection connection, byte[] body, String authorization) throws Exception {
+        boolean completed = false;
         if (authorization != null) {
             connection.setRequestProperty("Authorization", authorization);
         }
-        writeBody(connection, body);
-        int code = connection.getResponseCode();
-        String responseBody = readAll(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
-        connection.disconnect();
-        return new Response(code, responseBody);
+        try {
+            writeBody(connection, body);
+            int code = connection.getResponseCode();
+            String responseBody = readAll(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+            completed = true;
+            return new Response(code, responseBody);
+        } finally {
+            if (!completed) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private boolean shouldFallbackToRawHttp(String url, Throwable throwable) {
+        if (!url.startsWith("http://")) {
+            return false;
+        }
+        String message = throwable.getMessage();
+        if (message == null) {
+            message = "";
+        }
+        String lower = message.toLowerCase();
+        return throwable instanceof SecurityException
+                || lower.contains("cleartext")
+                || lower.contains("not permitted")
+                || lower.contains("unknown service");
     }
 
     private Response rawHttpPost(String urlValue, String contentType, byte[] body, String authorization) throws Exception {
@@ -443,6 +489,8 @@ final class HeartwithUploader {
         connection.setReadTimeout(5_000);
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", contentType);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Connection", "keep-alive");
         connection.setDoOutput(true);
         return connection;
     }

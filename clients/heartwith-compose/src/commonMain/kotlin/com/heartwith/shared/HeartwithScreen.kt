@@ -1093,7 +1093,7 @@ private fun StatusTag(
 private fun relativeSeenText(lastSeenMs: Long): String {
     val seconds = max(0L, (nowMs() - lastSeenMs) / 1000)
     return when {
-        seconds < 5 -> "just now"
+        seconds < 5 -> "now"
         seconds < 60 -> "${seconds}s ago"
         else -> "${seconds / 60}m ago"
     }

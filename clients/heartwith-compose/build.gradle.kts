@@ -1,8 +1,9 @@
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack
 
-val heartwithVersionCode = 2
-val heartwithVersionName = "0.1.1"
+val heartwithVersionCode = (findProperty("heartwithClientVersionCode") as String).toInt()
+val heartwithVersionName = findProperty("heartwithClientVersionName") as String
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
@@ -13,7 +14,11 @@ plugins {
 }
 
 kotlin {
-    androidTarget()
+    androidTarget {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
 
     @OptIn(ExperimentalWasmDsl::class)
     wasmJs {
@@ -56,7 +61,11 @@ kotlin {
 
 extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") {
     namespace = "com.heartwith.app"
-    compileSdk = 36
+    compileSdk = 37
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "com.heartwith.app"
@@ -64,6 +73,11 @@ extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") 
         targetSdk = 36
         versionCode = heartwithVersionCode
         versionName = heartwithVersionName
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     signingConfigs {

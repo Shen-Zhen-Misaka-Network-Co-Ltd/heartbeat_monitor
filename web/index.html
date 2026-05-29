@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Heartwith</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>
       :root {
         color-scheme: dark;
@@ -194,7 +197,7 @@
         max: zh ? "最高" : "max",
         now: zh ? "现在" : "now",
         ago: zh ? "前" : "ago",
-        justNow: zh ? "刚刚" : "just now",
+        justNow: "now",
         empty: zh ? "还没有采集端在线" : "No collectors yet",
       };
       document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = text[el.dataset.i18n]; });
@@ -233,11 +236,21 @@
       function normalizedParticipant(p) {
         return { ...p, status: liveStatus(p.last_seen_ms) };
       }
+      function latestSeriesSample(id) {
+        const samples = state.series.get(id) || [];
+        return samples.reduce((latest, sample) => !latest || sample.t_ms >= latest.t_ms ? sample : latest, null);
+      }
+      function displayParticipant(p) {
+        const latest = latestSeriesSample(p.collector_id);
+        const seriesIsNewer = latest && (!p.last_seen_ms || latest.t_ms >= p.last_seen_ms);
+        const merged = seriesIsNewer ? { ...p, last_bpm: latest.bpm, last_seen_ms: latest.t_ms } : p;
+        return normalizedParticipant(merged);
+      }
       function visibleParticipants() {
-        const participants = state.participants.map(normalizedParticipant);
-        if (state.seenFilterSeconds == null) return participants;
+        const participants = state.participants.map(displayParticipant);
+        if (state.seenFilterSeconds == null) return sortParticipants(participants);
         const cutoff = Date.now() - state.seenFilterSeconds * 1000;
-        return participants.filter((p) => p.last_seen_ms && p.last_seen_ms >= cutoff);
+        return sortParticipants(participants.filter((p) => p.last_seen_ms && p.last_seen_ms >= cutoff));
       }
       function pruneExpanded(visible) {
         const ids = new Set(visible.map((p) => p.collector_id));
@@ -249,7 +262,10 @@
       function applyEvent(event) {
         if (event.type === "snapshot") state.participants = sortParticipants(event.participants || []);
         if (event.type === "participant_update" && event.participant) {
-          const next = state.participants.filter((p) => p.collector_id !== event.participant.collector_id);
+          const next = state.participants.filter((p) =>
+            p.collector_id !== event.participant.collector_id &&
+            p.display_name !== event.participant.display_name
+          );
           next.push(event.participant);
           state.participants = sortParticipants(next);
         }
@@ -428,7 +444,10 @@
         events.onmessage = (ev) => { heroSub.textContent = text.connected; applyEvent(JSON.parse(ev.data)); };
         events.onerror = () => { heroSub.textContent = text.disconnected; };
       } catch (_) {}
-      setInterval(scheduleRender, 10000);
+      setInterval(scheduleRender, 5000);
+      setInterval(() => {
+        for (const id of state.expanded) loadSeries(id);
+      }, 15000);
       addEventListener("resize", scheduleRender);
     </script>
   </body>

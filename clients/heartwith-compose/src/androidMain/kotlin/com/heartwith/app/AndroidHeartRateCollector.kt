@@ -416,7 +416,7 @@ class AndroidHeartRateCollector(
                 displayName = displayName,
                 deviceModel = actualDeviceModel,
                 clientPlatform = "android",
-                appVersion = "0.1.0",
+                appVersion = BuildConfig.VERSION_NAME,
             ),
         )
         sessionDeviceModel = actualDeviceModel

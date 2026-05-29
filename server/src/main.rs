@@ -27,11 +27,7 @@ use sqlx::{
 };
 use tokio::sync::{broadcast, RwLock};
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    services::ServeDir,
-    set_header::SetResponseHeaderLayer,
-};
+use tower_http::{cors::CorsLayer, services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 const MIN_BPM: i32 = 30;
@@ -39,6 +35,7 @@ const MAX_BPM: i32 = 240;
 const ONLINE_AFTER_MS: i64 = 20_000;
 const OFFLINE_AFTER_MS: i64 = 120_000;
 const MAX_CLOCK_SKEW_MS: i64 = 60_000;
+const MAX_SAMPLE_FUTURE_MS: i64 = 5_000;
 const RAW_SAMPLE_TTL_MS: i64 = 24 * 60 * 60_000;
 const MEMORY_SERIES_TTL_MS: i64 = 10 * 60_000;
 const ROLLUP_TTL_MS: i64 = 90 * 24 * 60 * 60_000;
@@ -441,10 +438,16 @@ impl Db {
         Ok(())
     }
 
-    async fn load_store(&self, sample_cutoff_ms: i64) -> anyhow::Result<Store> {
+    async fn load_store(&self, sample_cutoff_ms: i64, current_ms: i64) -> anyhow::Result<Store> {
         match &self.pool {
-            DbPool::Postgres(pool) => self.load_store_postgres(pool, sample_cutoff_ms).await,
-            DbPool::Sqlite(pool) => self.load_store_sqlite(pool, sample_cutoff_ms).await,
+            DbPool::Postgres(pool) => {
+                self.load_store_postgres(pool, sample_cutoff_ms, current_ms)
+                    .await
+            }
+            DbPool::Sqlite(pool) => {
+                self.load_store_sqlite(pool, sample_cutoff_ms, current_ms)
+                    .await
+            }
         }
     }
 
@@ -452,6 +455,7 @@ impl Db {
         &self,
         pool: &SqlitePool,
         sample_cutoff_ms: i64,
+        current_ms: i64,
     ) -> anyhow::Result<Store> {
         let mut store = Store::default();
         let collectors = sqlx::query(
@@ -533,6 +537,7 @@ impl Db {
                 });
             }
         }
+        reconcile_loaded_latest(&mut store, current_ms);
         Ok(store)
     }
 
@@ -540,6 +545,7 @@ impl Db {
         &self,
         pool: &PgPool,
         sample_cutoff_ms: i64,
+        current_ms: i64,
     ) -> anyhow::Result<Store> {
         let mut store = Store::default();
         let collectors = sqlx::query(
@@ -621,6 +627,7 @@ impl Db {
                 });
             }
         }
+        reconcile_loaded_latest(&mut store, current_ms);
         Ok(store)
     }
 
@@ -762,20 +769,28 @@ impl Db {
         &self,
         collector_id: &str,
         cutoff_ms: i64,
+        upper_ms: i64,
         window_ms: i64,
         max_points: i64,
     ) -> anyhow::Result<Vec<SeriesSample>> {
         let bucket_ms = (window_ms / max_points.max(1)).max(1);
-        match &self.pool {
+        let mut samples = match &self.pool {
             DbPool::Sqlite(pool) => {
-                self.series_sqlite(pool, collector_id, cutoff_ms, bucket_ms)
+                self.series_sqlite(pool, collector_id, cutoff_ms, upper_ms, bucket_ms)
                     .await
             }
             DbPool::Postgres(pool) => {
-                self.series_postgres(pool, collector_id, cutoff_ms, bucket_ms)
+                self.series_postgres(pool, collector_id, cutoff_ms, upper_ms, bucket_ms)
                     .await
             }
+        }?;
+        if let Some(latest) = self
+            .latest_raw_sample(collector_id, cutoff_ms, upper_ms)
+            .await?
+        {
+            merge_latest_sample(&mut samples, latest);
         }
+        Ok(samples)
     }
 
     async fn series_sqlite(
@@ -783,19 +798,21 @@ impl Db {
         pool: &SqlitePool,
         collector_id: &str,
         cutoff_ms: i64,
+        upper_ms: i64,
         bucket_ms: i64,
     ) -> anyhow::Result<Vec<SeriesSample>> {
         let rows = sqlx::query(
             r#"
             SELECT CAST(AVG(t_ms) AS INTEGER) AS t_ms, CAST(ROUND(AVG(bpm)) AS INTEGER) AS bpm
             FROM heart_rate_samples
-            WHERE collector_id = ? AND t_ms >= ?
+            WHERE collector_id = ? AND t_ms >= ? AND t_ms <= ?
             GROUP BY ((t_ms - ?) / ?)
             ORDER BY t_ms
             "#,
         )
         .bind(collector_id)
         .bind(cutoff_ms)
+        .bind(upper_ms)
         .bind(cutoff_ms)
         .bind(bucket_ms)
         .fetch_all(pool)
@@ -814,19 +831,21 @@ impl Db {
         pool: &PgPool,
         collector_id: &str,
         cutoff_ms: i64,
+        upper_ms: i64,
         bucket_ms: i64,
     ) -> anyhow::Result<Vec<SeriesSample>> {
         let rows = sqlx::query(
             r#"
             SELECT AVG(t_ms)::BIGINT AS t_ms, ROUND(AVG(bpm))::INTEGER AS bpm
             FROM heart_rate_samples
-            WHERE collector_id = $1 AND t_ms >= $2
-            GROUP BY ((t_ms - $3) / $4)
+            WHERE collector_id = $1 AND t_ms >= $2 AND t_ms <= $3
+            GROUP BY ((t_ms - $4) / $5)
             ORDER BY t_ms
             "#,
         )
         .bind(collector_id)
         .bind(cutoff_ms)
+        .bind(upper_ms)
         .bind(cutoff_ms)
         .bind(bucket_ms)
         .fetch_all(pool)
@@ -838,6 +857,78 @@ impl Db {
                 bpm: row.get("bpm"),
             })
             .collect())
+    }
+
+    async fn latest_raw_sample(
+        &self,
+        collector_id: &str,
+        cutoff_ms: i64,
+        upper_ms: i64,
+    ) -> anyhow::Result<Option<SeriesSample>> {
+        match &self.pool {
+            DbPool::Sqlite(pool) => {
+                self.latest_raw_sample_sqlite(pool, collector_id, cutoff_ms, upper_ms)
+                    .await
+            }
+            DbPool::Postgres(pool) => {
+                self.latest_raw_sample_postgres(pool, collector_id, cutoff_ms, upper_ms)
+                    .await
+            }
+        }
+    }
+
+    async fn latest_raw_sample_sqlite(
+        &self,
+        pool: &SqlitePool,
+        collector_id: &str,
+        cutoff_ms: i64,
+        upper_ms: i64,
+    ) -> anyhow::Result<Option<SeriesSample>> {
+        let row = sqlx::query(
+            r#"
+            SELECT t_ms, bpm
+            FROM heart_rate_samples
+            WHERE collector_id = ? AND t_ms >= ? AND t_ms <= ?
+            ORDER BY t_ms DESC, received_at_ms DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(collector_id)
+        .bind(cutoff_ms)
+        .bind(upper_ms)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|row| SeriesSample {
+            t_ms: row.get("t_ms"),
+            bpm: row.get("bpm"),
+        }))
+    }
+
+    async fn latest_raw_sample_postgres(
+        &self,
+        pool: &PgPool,
+        collector_id: &str,
+        cutoff_ms: i64,
+        upper_ms: i64,
+    ) -> anyhow::Result<Option<SeriesSample>> {
+        let row = sqlx::query(
+            r#"
+            SELECT t_ms, bpm
+            FROM heart_rate_samples
+            WHERE collector_id = $1 AND t_ms >= $2 AND t_ms <= $3
+            ORDER BY t_ms DESC, received_at_ms DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(collector_id)
+        .bind(cutoff_ms)
+        .bind(upper_ms)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|row| SeriesSample {
+            t_ms: row.get("t_ms"),
+            bpm: row.get("bpm"),
+        }))
     }
 
     async fn persist_ingest_sqlite(
@@ -1071,7 +1162,10 @@ async fn app() -> anyhow::Result<Router> {
 
 async fn app_with_database(database_url: &str) -> anyhow::Result<Router> {
     let db = Db::connect(database_url).await?;
-    let store = db.load_store(now_ms() - MEMORY_SERIES_TTL_MS).await?;
+    let current_ms = now_ms();
+    let store = db
+        .load_store(current_ms - MEMORY_SERIES_TTL_MS, current_ms)
+        .await?;
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         inner: Arc::new(RwLock::new(store)),
@@ -1281,12 +1375,20 @@ async fn ingest_batch(
         };
         let mut accepted = 0;
         let mut latest_changed = false;
+        let mut rejected_future_samples = 0usize;
+        let mut max_future_offset_ms = 0i64;
 
         for sample in payload.samples {
             if !(MIN_BPM..=MAX_BPM).contains(&sample.bpm) {
                 continue;
             }
-            let t_ms = anchor_ms + sample.dt_ms;
+            let raw_t_ms = anchor_ms + sample.dt_ms;
+            if raw_t_ms > recv_ms + MAX_SAMPLE_FUTURE_MS {
+                rejected_future_samples += 1;
+                max_future_offset_ms = max_future_offset_ms.max(raw_t_ms - recv_ms);
+                continue;
+            }
+            let t_ms = raw_t_ms;
             let series_sample = SeriesSample {
                 t_ms,
                 bpm: sample.bpm,
@@ -1294,11 +1396,24 @@ async fn ingest_batch(
             collector.series.push_back(series_sample.clone());
             persist_samples.push(series_sample);
             accepted += 1;
-            if collector.last_seen_ms.map_or(true, |last| t_ms >= last) {
+            let comparable_last_seen_ms = collector.last_seen_ms.map(|last| last.min(recv_ms));
+            if comparable_last_seen_ms.map_or(true, |last| t_ms >= last) {
                 collector.last_seen_ms = Some(t_ms);
                 collector.last_bpm = Some(sample.bpm);
                 latest_changed = true;
             }
+        }
+        if rejected_future_samples > 0 {
+            tracing::warn!(
+                collector_id = %collector.collector_id,
+                display_name = %collector.display_name,
+                seq = payload_seq,
+                rejected_future_samples,
+                max_future_offset_ms,
+                sent_at_ms = payload.sent_at_ms,
+                recv_ms,
+                "rejected heart-rate samples with future timestamps"
+            );
         }
 
         collector.seen_seqs.insert(payload_seq);
@@ -1400,7 +1515,9 @@ async fn participant_series(
     let window_seconds = query.window_seconds.clamp(60, 24 * 3600);
     let max_points = query.max_points.clamp(60, 1200);
     let window_ms = window_seconds * 1000;
-    let cutoff = now_ms() - window_ms;
+    let current_ms = now_ms();
+    let cutoff = current_ms - window_ms;
+    let upper = current_ms + MAX_SAMPLE_FUTURE_MS;
     let store = state.inner.read().await;
     if !store.collectors.contains_key(&collector_id) {
         return Err(ApiError::NotFound);
@@ -1408,7 +1525,7 @@ async fn participant_series(
     drop(store);
     let samples = state
         .db
-        .series(&collector_id, cutoff, window_ms, max_points)
+        .series(&collector_id, cutoff, upper, window_ms, max_points)
         .await?;
     Ok(Json(SeriesResponse {
         collector_id,
@@ -1439,14 +1556,49 @@ fn decode_payload(headers: &HeaderMap, bytes: &[u8]) -> Result<BatchPayload, Api
 }
 
 fn participant_for(collector: &Collector, current_ms: i64) -> Participant {
+    let display_last_seen_ms =
+        effective_last_seen_ms(collector.last_seen_ms, collector.updated_at_ms, current_ms);
     Participant {
         collector_id: collector.collector_id.clone(),
         display_name: collector.display_name.clone(),
         device_model: collector.device_model.clone(),
-        status: status_for(collector.last_seen_ms, current_ms),
+        status: status_for(display_last_seen_ms, current_ms),
         last_bpm: collector.last_bpm,
-        last_seen_ms: collector.last_seen_ms,
+        last_seen_ms: display_last_seen_ms,
         updated_at_ms: collector.updated_at_ms,
+    }
+}
+
+fn effective_last_seen_ms(
+    last_seen_ms: Option<i64>,
+    updated_at_ms: Option<i64>,
+    current_ms: i64,
+) -> Option<i64> {
+    let last_seen_ms = last_seen_ms?;
+    if last_seen_ms > current_ms + MAX_SAMPLE_FUTURE_MS {
+        return updated_at_ms.map(|updated| updated.min(current_ms));
+    }
+    Some(last_seen_ms.min(current_ms))
+}
+
+fn reconcile_loaded_latest(store: &mut Store, current_ms: i64) {
+    let upper_ms = current_ms + MAX_SAMPLE_FUTURE_MS;
+    for collector in store.collectors.values_mut() {
+        let has_future_latest = collector
+            .last_seen_ms
+            .is_some_and(|last_seen| last_seen > upper_ms);
+        if !has_future_latest {
+            continue;
+        }
+        if let Some(latest) = collector
+            .series
+            .iter()
+            .filter(|sample| sample.t_ms <= upper_ms)
+            .max_by_key(|sample| sample.t_ms)
+        {
+            collector.last_seen_ms = Some(latest.t_ms);
+            collector.last_bpm = Some(latest.bpm);
+        }
     }
 }
 
@@ -1500,6 +1652,15 @@ fn participant_sort_key(participant: &Participant) -> (i64, i64) {
         participant.last_seen_ms.unwrap_or_default(),
         participant.updated_at_ms.unwrap_or_default(),
     )
+}
+
+fn merge_latest_sample(samples: &mut Vec<SeriesSample>, latest: SeriesSample) {
+    if let Some(existing) = samples.iter_mut().find(|sample| sample.t_ms == latest.t_ms) {
+        *existing = latest;
+    } else {
+        samples.push(latest);
+        samples.sort_by_key(|sample| sample.t_ms);
+    }
 }
 
 fn status_rank(status: ParticipantStatus) -> u8 {
@@ -1877,6 +2038,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn series_preserves_exact_latest_sample_after_bucket_aggregation() {
+        let app = test_app().await;
+        let session = create_test_session(app.clone()).await;
+        let current_ms = now_ms();
+        let payload = BatchPayload {
+            schema: 1,
+            collector_id: session.collector_id.clone(),
+            seq: 1,
+            sent_at_ms: current_ms,
+            display_name: Some("Allen".to_string()),
+            device_model: Some("Mi Band".to_string()),
+            samples: vec![
+                RelativeSample {
+                    dt_ms: -100,
+                    bpm: 80,
+                },
+                RelativeSample { dt_ms: 0, bpm: 100 },
+            ],
+            ble: None,
+        };
+        assert_eq!(
+            post_batch(app.clone(), &session, &payload).await.accepted,
+            2
+        );
+
+        let series_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/participants/{}/series?window_seconds=600&max_points=600",
+                        session.collector_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = series_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let series: SeriesResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(series.samples.last().map(|sample| sample.bpm), Some(100));
+        assert_eq!(
+            series.samples.last().map(|sample| sample.t_ms),
+            Some(current_ms)
+        );
+    }
+
+    #[tokio::test]
+    async fn future_sample_times_are_rejected() {
+        let app = test_app().await;
+        let session = create_test_session(app.clone()).await;
+        let current_ms = now_ms();
+        let payload = BatchPayload {
+            schema: 1,
+            collector_id: session.collector_id.clone(),
+            seq: 1,
+            sent_at_ms: current_ms,
+            display_name: Some("Allen".to_string()),
+            device_model: Some("Mi Band".to_string()),
+            samples: vec![RelativeSample {
+                dt_ms: 6 * 60 * 60_000,
+                bpm: 88,
+            }],
+            ble: None,
+        };
+        assert_eq!(
+            post_batch(app.clone(), &session, &payload).await.accepted,
+            0
+        );
+
+        let lobby_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/lobby/participants")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = lobby_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let lobby: LobbyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(lobby.participants.is_empty());
+    }
+
+    #[tokio::test]
     async fn database_persists_lobby_and_series_across_restart() {
         let (app, database_url) = test_app_with_url().await;
         let session = create_test_session(app.clone()).await;
@@ -1960,5 +2217,58 @@ mod tests {
             status_for(Some(current_ms - 120_001), current_ms),
             ParticipantStatus::Offline
         ));
+    }
+
+    #[test]
+    fn participant_display_time_uses_receive_time_for_future_dirty_samples() {
+        let current_ms = 1_000_000;
+        assert_eq!(
+            effective_last_seen_ms(
+                Some(current_ms + 60 * 60_000),
+                Some(current_ms - 30_000),
+                current_ms,
+            ),
+            Some(current_ms - 30_000)
+        );
+        assert_eq!(
+            effective_last_seen_ms(
+                Some(current_ms + 1_000),
+                Some(current_ms - 30_000),
+                current_ms
+            ),
+            Some(current_ms)
+        );
+    }
+
+    #[test]
+    fn loaded_future_latest_is_reconciled_from_valid_recent_series() {
+        let current_ms = 1_000_000;
+        let mut store = Store::default();
+        store.collectors.insert(
+            "collector".to_string(),
+            Collector {
+                collector_id: "collector".to_string(),
+                display_name: "Allen".to_string(),
+                device_model: "Mi Band".to_string(),
+                _client_platform: "test".to_string(),
+                _app_version: "test".to_string(),
+                _created_at_ms: current_ms,
+                last_bpm: Some(90),
+                last_seen_ms: Some(current_ms + 60 * 60_000),
+                updated_at_ms: Some(current_ms - 60_000),
+                seen_seqs: HashSet::new(),
+                seq_order: VecDeque::new(),
+                series: VecDeque::from(vec![SeriesSample {
+                    t_ms: current_ms - 10_000,
+                    bpm: 104,
+                }]),
+            },
+        );
+
+        reconcile_loaded_latest(&mut store, current_ms);
+
+        let collector = store.collectors.get("collector").unwrap();
+        assert_eq!(collector.last_bpm, Some(104));
+        assert_eq!(collector.last_seen_ms, Some(current_ms - 10_000));
     }
 }

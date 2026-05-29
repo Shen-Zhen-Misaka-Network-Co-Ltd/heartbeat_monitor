@@ -13,6 +13,7 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Build;
 import android.os.Bundle;
+import android.security.NetworkSecurityPolicy;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -24,6 +25,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,6 +44,7 @@ public final class MiHealthHookModule extends XposedModule {
     private static final String TARGET_PACKAGE = "com.mi.health";
     private static final String PATCHED_TARGET_PACKAGE = "com.mi.health.heartwith";
     private static final String RUNTIME_PREFS = "heartwith_mihealth_runtime";
+    private static final String KEY_CACHED_SERVER_URL = "cached_server_url";
     private static final String ACTION_SPORT_MODE_CHANGED = "com.heartwith.mihealth.lsp.SPORT_MODE_CHANGED";
     private static final String EXTRA_SPORT_MODE_UNTIL_MS = "sport_mode_until_ms";
     private static final String KEY_ACTIVE_SOURCE = "active_source";
@@ -118,6 +121,7 @@ public final class MiHealthHookModule extends XposedModule {
     private final AtomicBoolean starting = new AtomicBoolean(false);
     private final AtomicBoolean configReceiverRegistered = new AtomicBoolean(false);
     private final AtomicBoolean sportModeReceiverRegistered = new AtomicBoolean(false);
+    private final AtomicBoolean cleartextPolicyHookInstalled = new AtomicBoolean(false);
     private final HeartwithUploader uploader = new HeartwithUploader(WORKER);
     private final List<Object> launchModels = new ArrayList<>();
     private volatile Context appContext;
@@ -160,6 +164,7 @@ public final class MiHealthHookModule extends XposedModule {
     private volatile boolean npatchWrappedDetected;
     private volatile boolean npatchRouteDiagLogged;
     private volatile boolean npatchArouterIndexesInstalled;
+    private volatile boolean cleartextPolicyAllowLogged;
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -183,6 +188,9 @@ public final class MiHealthHookModule extends XposedModule {
         }
         ClassLoader classLoader = param.getClassLoader();
         targetClassLoader = classLoader;
+        if (isWorkerProcess()) {
+            hookHeartwithCleartextPolicy();
+        }
         hookLifecycle(classLoader);
         if (isWorkerProcess()) {
             hookHeartRateSinks(classLoader);
@@ -191,6 +199,146 @@ public final class MiHealthHookModule extends XposedModule {
             hookPassiveSportHeartRateSinks(classLoader);
         }
         logLine("hooks installed process=" + processName);
+    }
+
+    private void hookHeartwithCleartextPolicy() {
+        if (!cleartextPolicyHookInstalled.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            Method method = NetworkSecurityPolicy.class.getDeclaredMethod("isCleartextTrafficPermitted", String.class);
+            hook(method).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object arg = chain.getArg(0);
+                    if (arg instanceof String && isHeartwithServerHost((String) arg)) {
+                        if (BuildConfig.DEBUG && !cleartextPolicyAllowLogged) {
+                            cleartextPolicyAllowLogged = true;
+                            Log.i(TAG, "allow cleartext for Heartwith host: " + arg);
+                        }
+                        return true;
+                    }
+                    return chain.proceed();
+                }
+            });
+            Method globalMethod = NetworkSecurityPolicy.class.getDeclaredMethod("isCleartextTrafficPermitted");
+            hook(globalMethod).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    if (HeartwithCleartextScope.isActive()) {
+                        if (BuildConfig.DEBUG && !cleartextPolicyAllowLogged) {
+                            cleartextPolicyAllowLogged = true;
+                            Log.i(TAG, "allow cleartext for Heartwith request scope");
+                        }
+                        return true;
+                    }
+                    return chain.proceed();
+                }
+            });
+        } catch (Throwable throwable) {
+            diagLine("heartwith cleartext policy hook failed: " + throwable.getClass().getSimpleName() + ": " + throwable.getMessage());
+        }
+        hookAndroidOkHttpCleartextPolicy();
+        diagLine("heartwith cleartext policy hook installed");
+    }
+
+    private void hookAndroidOkHttpCleartextPolicy() {
+        String[] classNames = {
+                "com.android.okhttp.internal.Platform",
+                "com.android.okhttp.internal.AndroidPlatform",
+                "com.android.org.conscrypt.Platform",
+                "com.android.okhttp.HttpHandler$CleartextURLFilter"
+        };
+        for (String className : classNames) {
+            try {
+                Class<?> target = Class.forName(className);
+                int count = 0;
+                for (final Method method : target.getDeclaredMethods()) {
+                    boolean cleartextPermittedMethod = "isCleartextTrafficPermitted".equals(method.getName())
+                            && method.getReturnType() == Boolean.TYPE;
+                    boolean urlFilterMethod = "checkURLPermitted".equals(method.getName())
+                            && method.getReturnType() == Void.TYPE;
+                    if (!cleartextPermittedMethod && !urlFilterMethod) {
+                        continue;
+                    }
+                    Class<?>[] parameterTypes = method.getParameterTypes();
+                    if (parameterTypes.length > 1) {
+                        continue;
+                    }
+                    method.setAccessible(true);
+                    hook(method).intercept(new XposedInterface.Hooker() {
+                        @Override
+                        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                            if (shouldAllowHeartwithCleartext(chain, method)) {
+                                return method.getReturnType() == Boolean.TYPE ? true : null;
+                            }
+                            return chain.proceed();
+                        }
+                    });
+                    count += 1;
+                }
+                if (count > 0) {
+                    diagLine("android okhttp cleartext hook installed: " + className + " count=" + count);
+                }
+            } catch (Throwable throwable) {
+                diagLine("android okhttp cleartext hook unavailable: " + className + ": " + throwable.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private boolean shouldAllowHeartwithCleartext(XposedInterface.Chain chain, Method method) {
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (parameterTypes.length == 1) {
+            Object arg = chain.getArg(0);
+            if (arg instanceof String && isHeartwithServerHost((String) arg)) {
+                logCleartextAllow("allow cleartext for Heartwith host: " + arg);
+                return true;
+            }
+            if (arg instanceof URL && isHeartwithServerHost(((URL) arg).getHost())) {
+                logCleartextAllow("allow cleartext for Heartwith url: " + ((URL) arg).getHost());
+                return true;
+            }
+        }
+        if (HeartwithCleartextScope.isActive()) {
+            logCleartextAllow("allow cleartext for Heartwith request scope");
+            return true;
+        }
+        return false;
+    }
+
+    private void logCleartextAllow(String message) {
+        if (BuildConfig.DEBUG && !cleartextPolicyAllowLogged) {
+            cleartextPolicyAllowLogged = true;
+            Log.i(TAG, message);
+        }
+    }
+
+    private boolean isHeartwithServerHost(String host) {
+        String expected = configuredHeartwithServerHost();
+        return expected != null && expected.equalsIgnoreCase(host);
+    }
+
+    private String configuredHeartwithServerHost() {
+        String serverUrl = HeartwithSettings.DEFAULT_SERVER_URL;
+        Context context = appContext;
+        if (context != null) {
+            try {
+                String cached = context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+                        .getString(KEY_CACHED_SERVER_URL, serverUrl);
+                if (cached != null && !cached.trim().isEmpty()) {
+                    serverUrl = cached;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (serverUrl == null || !serverUrl.startsWith("http://")) {
+            return null;
+        }
+        try {
+            return new URL(serverUrl).getHost();
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private void hookXCrashNativeHandler(ClassLoader classLoader) {

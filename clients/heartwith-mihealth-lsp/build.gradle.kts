@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+val heartwithVersionCode = (findProperty("heartwithClientVersionCode") as String).toInt()
+val heartwithVersionName = findProperty("heartwithClientVersionName") as String
+
 android {
     namespace = "com.heartwith.mihealth.lsp"
     compileSdk = 37
@@ -14,8 +17,8 @@ android {
         applicationId = "com.heartwith.mihealth.lsp"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = heartwithVersionCode
+        versionName = heartwithVersionName
     }
 
     compileOptions {
