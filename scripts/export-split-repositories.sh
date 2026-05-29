@@ -236,6 +236,56 @@ YAML
   } | write_workflow "${repo_dir}" ci
 }
 
+write_ble_release() {
+  local repo_dir="$1"
+  write_workflow "${repo_dir}" release <<'YAML'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'android-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platform
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Restore release signing key
+        run: |
+          mkdir -p "$HOME/.android"
+          printf '%s' "$HEARTWITH_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+        env:
+          HEARTWITH_RELEASE_KEYSTORE_BASE64: ${{ secrets.HEARTWITH_RELEASE_KEYSTORE_BASE64 }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew :heartwith-compose:assembleRelease --warning-mode=fail
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: clients/heartwith-compose/build/outputs/apk/release/Heartwith-*-release.apk
+          generate_release_notes: true
+YAML
+}
+
 write_mihealth_ci() {
   local repo_dir="$1"
   {
@@ -262,6 +312,56 @@ YAML
         run: ./gradlew :heartwith-mihealth-lsp:assembleRelease --warning-mode=fail
 YAML
   } | write_workflow "${repo_dir}" ci
+}
+
+write_mihealth_release() {
+  local repo_dir="$1"
+  write_workflow "${repo_dir}" release <<'YAML'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'mihealth-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platform
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Restore release signing key
+        run: |
+          mkdir -p "$HOME/.android"
+          printf '%s' "$HEARTWITH_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+        env:
+          HEARTWITH_RELEASE_KEYSTORE_BASE64: ${{ secrets.HEARTWITH_RELEASE_KEYSTORE_BASE64 }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew :heartwith-mihealth-lsp:assembleRelease --warning-mode=fail
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: clients/heartwith-mihealth-lsp/build/outputs/apk/release/Heartwith-*-release.apk
+          generate_release_notes: true
+YAML
 }
 
 init_repo() {
@@ -349,6 +449,7 @@ write_gradle_settings "${android_dir}" "heartwith-ble-collector" \
 write_readme "${android_dir}" "Heartwith BLE Collector" \
 "Native BLE collector Android app. Build with: ./gradlew :heartwith-compose:assembleRelease. This repository will depend on heartwith-android-uploader for shared upload logic."
 write_ble_ci "${android_dir}"
+write_ble_release "${android_dir}"
 init_repo "${android_dir}"
 
 mihealth_dir="$(prepare_repo_dir heartwith-mihealth-module)"
@@ -363,6 +464,7 @@ write_gradle_settings "${mihealth_dir}" "heartwith-mihealth-module" \
 write_readme "${mihealth_dir}" "Heartwith MiHealth Module" \
 "LSPosed/NPatch module for Xiaomi Health heart-rate collection. Build with: ./gradlew :heartwith-mihealth-lsp:assembleRelease. This repository keeps MiHealth-specific hook and cleartext adaptation code while sharing upload protocol through heartwith-android-uploader."
 write_mihealth_ci "${mihealth_dir}"
+write_mihealth_release "${mihealth_dir}"
 init_repo "${mihealth_dir}"
 
 printf 'Split repositories exported to %s\n' "${OUT_DIR}"
