@@ -1,70 +1,19 @@
-import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack
-
 val heartwithVersionCode = (findProperty("heartwithClientVersionCode") as String).toInt()
 val heartwithVersionName = findProperty("heartwithClientVersionName") as String
 
 plugins {
-    alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.compose.compiler)
-    alias(libs.plugins.compose.multiplatform)
 }
 
-kotlin {
-    androidTarget {
-        compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
-        }
-    }
-
-    @OptIn(ExperimentalWasmDsl::class)
-    wasmJs {
-        browser {
-            commonWebpackConfig {
-                outputFileName = "heartwith.js"
-            }
-        }
-        binaries.executable()
-    }
-
-    sourceSets {
-        commonMain.dependencies {
-            implementation(libs.compose.runtime)
-            implementation(libs.compose.foundation)
-            implementation(libs.compose.ui)
-            implementation(libs.kotlinx.serialization.json)
-            implementation(libs.kotlinx.serialization.cbor)
-            implementation(libs.ktor.client.core)
-            implementation(libs.ktor.client.content.negotiation)
-            implementation(libs.ktor.serialization.kotlinx.json)
-            implementation(libs.miuix.ui)
-            implementation(libs.miuix.icons)
-        }
-        commonTest.dependencies {
-            implementation(kotlin("test"))
-        }
-        androidMain.dependencies {
-            implementation(libs.androidx.activity.compose)
-            implementation(libs.androidx.core.ktx)
-            implementation(libs.kotlinx.coroutines.android)
-            implementation(libs.ktor.client.okhttp)
-        }
-        wasmJsMain.dependencies {
-            implementation(libs.compose.components.resources)
-            implementation(libs.ktor.client.js)
-        }
-    }
-}
-
-extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") {
+android {
     namespace = "com.heartwith.app"
     compileSdk = 37
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 
     defaultConfig {
@@ -73,6 +22,15 @@ extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") 
         targetSdk = 36
         versionCode = heartwithVersionCode
         versionName = heartwithVersionName
+    }
+
+    sourceSets {
+        getByName("main") {
+            manifest.srcFile("src/androidMain/AndroidManifest.xml")
+            res.directories.add("src/androidMain/res")
+            kotlin.directories.add("src/androidMain/kotlin")
+            kotlin.directories.add("../heartwith-shared/src/commonMain/kotlin")
+        }
     }
 
     compileOptions {
@@ -101,6 +59,23 @@ extensions.configure<com.android.build.api.dsl.ApplicationExtension>("android") 
     }
 }
 
+dependencies {
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.ui)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.cbor)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.okhttp)
+    implementation(libs.ktor.serialization.kotlinx.json)
+    implementation(libs.miuix.icons)
+    implementation(libs.miuix.ui)
+}
+
 afterEvaluate {
     tasks.named("assembleRelease") {
         doLast {
@@ -109,14 +84,5 @@ afterEvaluate {
             val target = releaseDir.resolve("Heartwith-v$heartwithVersionName-$heartwithVersionCode-release.apk")
             if (source.exists()) source.copyTo(target, overwrite = true)
         }
-    }
-}
-
-tasks.withType<KotlinWebpack>().configureEach {
-    doLast {
-        outputDirectory.get().asFile
-            .walkTopDown()
-            .filter { it.isFile && it.extension == "map" }
-            .forEach { it.delete() }
     }
 }

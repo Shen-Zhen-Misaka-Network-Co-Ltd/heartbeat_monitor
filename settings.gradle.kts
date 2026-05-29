@@ -17,6 +17,8 @@ dependencyResolutionManagement {
 rootProject.name = "heartwith"
 include(":heartwith-compose")
 project(":heartwith-compose").projectDir = file("clients/heartwith-compose")
+include(":heartwith-web")
+project(":heartwith-web").projectDir = file("clients/heartwith-web")
 include(":heartwith-mihealth-lsp")
 project(":heartwith-mihealth-lsp").projectDir = file("clients/heartwith-mihealth-lsp")
 include(":xposed-api-stub")

@@ -3,7 +3,9 @@
 小米手环心率共享大厅，全端实现：
 
 - `server/`: Rust + Axum 服务端，提供会话、CBOR 批量摄取、大厅快照、SSE 推送、最近曲线。
-- `clients/heartwith-compose/`: Kotlin Compose Multiplatform 客户端。
+- `clients/heartwith-compose/`: Android Compose 采集客户端。
+- `clients/heartwith-web/`: Kotlin/Wasm Compose 网页大厅。
+- `clients/heartwith-shared/`: Android 和 Web 共享的 Compose UI 与协议代码。
   - Android: 原生 BLE 订阅小米手环标准心率特征 `0x2A37`，低功耗批量上传。
   - Wasm/JS: 使用 Miuix 的网页大厅。
 - `clients/heartwith-mihealth-lsp/`: LSPosed 分支采集端，hook 小米运动健康实时心率链路并沿用同一套上传协议。
@@ -27,7 +29,7 @@ cargo run -p heartwith-server
 服务默认监听 `http://127.0.0.1:8000`。如果已经构建了 Web 客户端，Rust 服务端会优先托管：
 
 ```text
-clients/heartwith-compose/build/kotlin-webpack/wasmJs/productionExecutable
+clients/heartwith-web/build/dist/wasmJs/productionExecutable
 ```
 
 否则使用 `web-fallback/` 的轻量回退页面。
@@ -45,14 +47,14 @@ ANDROID_HOME=/path/to/android-sdk ./gradlew :heartwith-compose:assembleDebug
 Web:
 
 ```bash
-./gradlew :heartwith-compose:wasmJsBrowserProductionWebpack
+./gradlew :heartwith-web:wasmJsBrowserDistribution
 ```
 
 Tests:
 
 ```bash
 cargo test -p heartwith-server
-ANDROID_HOME=/path/to/android-sdk ./gradlew :heartwith-compose:allTests
+ANDROID_HOME=/path/to/android-sdk ./gradlew :heartwith-web:allTests
 ```
 
 ## API

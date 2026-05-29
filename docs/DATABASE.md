@@ -34,13 +34,15 @@ HEARTWITH_DATABASE_URL='sqlite://heartwith.db' cargo run -p heartwith-server
 - `collectors`: one logical collector per display name, token, device metadata, latest BPM.
 - `collector_seqs`: recent idempotency window for `collector_id + seq`.
 - `heart_rate_samples`: recent raw heart-rate samples with `(collector_id, t_ms)` indexes.
-- `heart_rate_rollups`: hourly aggregates used to keep long-term storage bounded without preserving raw samples forever.
+- `heart_rate_rollups`: hourly aggregates used to keep long-term storage bounded without preserving raw samples forever. Each bucket stores count, sum, sum of squares, min/max BPM, and first/last sample timestamps.
 
 When TimescaleDB is installed, `heart_rate_samples` is converted to a hypertable on `t_ms` with 1-hour chunks. If the extension is unavailable, the server logs a warning and continues with plain PostgreSQL indexes.
 
 ## Retention
 
-The server keeps raw samples for the recent 24-hour chart window and deletes older raw rows during ingest. At the same time, every accepted sample updates an hourly rollup row containing count, sum, min, max, and first/last timestamps. Rollups are kept for 90 days by default.
+The server keeps raw samples for the recent 24-hour chart window and deletes older raw rows during ingest. At startup, existing raw rows are first backfilled into hourly rollups and only then are expired raw rows pruned, so legacy data older than 24 hours is retained as analysis aggregates instead of being dropped without summary data.
+
+Every accepted sample updates an hourly rollup row containing count, sum, sum of squares, min, max, and first/last timestamps. `sum_sq` lets analysis compute variance as `sum_sq / count - avg^2`. Rollups are kept for 90 days by default.
 
 Series API queries read from the database with a time cutoff and `max_points` time buckets, so long ranges such as 6h and 24h do not require sending or rendering every raw sample.
 

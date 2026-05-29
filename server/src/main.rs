@@ -40,6 +40,7 @@ const RAW_SAMPLE_TTL_MS: i64 = 24 * 60 * 60_000;
 const MEMORY_SERIES_TTL_MS: i64 = 10 * 60_000;
 const ROLLUP_TTL_MS: i64 = 90 * 24 * 60 * 60_000;
 const ROLLUP_BUCKET_MS: i64 = 60 * 60_000;
+const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_SERIES_MAX_POINTS: i64 = 420;
 const MAX_BODY_BYTES: usize = 128 * 1024;
 
@@ -235,6 +236,8 @@ impl Db {
         };
         let db = Self { pool };
         db.migrate().await?;
+        db.backfill_rollups_from_raw().await?;
+        db.prune_expired(now_ms()).await?;
         Ok(db)
     }
 
@@ -313,6 +316,7 @@ impl Db {
                 bucket_ms INTEGER NOT NULL,
                 sample_count INTEGER NOT NULL,
                 bpm_sum INTEGER NOT NULL,
+                bpm_sum_sq INTEGER NOT NULL DEFAULT 0,
                 min_bpm INTEGER NOT NULL,
                 max_bpm INTEGER NOT NULL,
                 first_t_ms INTEGER NOT NULL,
@@ -324,6 +328,13 @@ impl Db {
         )
         .execute(pool)
         .await?;
+        ignore_duplicate_column(
+            sqlx::query(
+                "ALTER TABLE heart_rate_rollups ADD COLUMN bpm_sum_sq INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await,
+        )?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_rollups_collector_bucket ON heart_rate_rollups(collector_id, bucket_ms)",
         )
@@ -420,6 +431,7 @@ impl Db {
                 bucket_ms BIGINT NOT NULL,
                 sample_count BIGINT NOT NULL,
                 bpm_sum BIGINT NOT NULL,
+                bpm_sum_sq BIGINT NOT NULL DEFAULT 0,
                 min_bpm INTEGER NOT NULL,
                 max_bpm INTEGER NOT NULL,
                 first_t_ms BIGINT NOT NULL,
@@ -431,10 +443,120 @@ impl Db {
         .execute(pool)
         .await?;
         sqlx::query(
+            "ALTER TABLE heart_rate_rollups ADD COLUMN IF NOT EXISTS bpm_sum_sq BIGINT NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_rollups_collector_bucket ON heart_rate_rollups(collector_id, bucket_ms)",
         )
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    async fn backfill_rollups_from_raw(&self) -> anyhow::Result<()> {
+        match &self.pool {
+            DbPool::Sqlite(pool) => self.backfill_rollups_from_raw_sqlite(pool).await,
+            DbPool::Postgres(pool) => self.backfill_rollups_from_raw_postgres(pool).await,
+        }
+    }
+
+    async fn backfill_rollups_from_raw_sqlite(&self, pool: &SqlitePool) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO heart_rate_rollups (
+                collector_id, bucket_ms, sample_count, bpm_sum, bpm_sum_sq,
+                min_bpm, max_bpm, first_t_ms, last_t_ms
+            )
+            SELECT
+                collector_id,
+                (t_ms / ?) * ? AS bucket_ms,
+                COUNT(*) AS sample_count,
+                SUM(bpm) AS bpm_sum,
+                SUM(CAST(bpm AS INTEGER) * CAST(bpm AS INTEGER)) AS bpm_sum_sq,
+                MIN(bpm) AS min_bpm,
+                MAX(bpm) AS max_bpm,
+                MIN(t_ms) AS first_t_ms,
+                MAX(t_ms) AS last_t_ms
+            FROM heart_rate_samples
+            WHERE true
+            GROUP BY 1, 2
+            ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
+                sample_count = excluded.sample_count,
+                bpm_sum = excluded.bpm_sum,
+                bpm_sum_sq = excluded.bpm_sum_sq,
+                min_bpm = excluded.min_bpm,
+                max_bpm = excluded.max_bpm,
+                first_t_ms = excluded.first_t_ms,
+                last_t_ms = excluded.last_t_ms
+            "#,
+        )
+        .bind(ROLLUP_BUCKET_MS)
+        .bind(ROLLUP_BUCKET_MS)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn backfill_rollups_from_raw_postgres(&self, pool: &PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO heart_rate_rollups (
+                collector_id, bucket_ms, sample_count, bpm_sum, bpm_sum_sq,
+                min_bpm, max_bpm, first_t_ms, last_t_ms
+            )
+            SELECT
+                collector_id,
+                (t_ms / $1) * $1 AS bucket_ms,
+                COUNT(*) AS sample_count,
+                SUM(bpm)::BIGINT AS bpm_sum,
+                SUM((bpm::BIGINT * bpm::BIGINT))::BIGINT AS bpm_sum_sq,
+                MIN(bpm) AS min_bpm,
+                MAX(bpm) AS max_bpm,
+                MIN(t_ms) AS first_t_ms,
+                MAX(t_ms) AS last_t_ms
+            FROM heart_rate_samples
+            GROUP BY 1, 2
+            ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
+                sample_count = excluded.sample_count,
+                bpm_sum = excluded.bpm_sum,
+                bpm_sum_sq = excluded.bpm_sum_sq,
+                min_bpm = excluded.min_bpm,
+                max_bpm = excluded.max_bpm,
+                first_t_ms = excluded.first_t_ms,
+                last_t_ms = excluded.last_t_ms
+            "#,
+        )
+        .bind(ROLLUP_BUCKET_MS)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn prune_expired(&self, current_ms: i64) -> anyhow::Result<()> {
+        match &self.pool {
+            DbPool::Sqlite(pool) => {
+                sqlx::query("DELETE FROM heart_rate_samples WHERE t_ms < ?")
+                    .bind(current_ms - RAW_SAMPLE_TTL_MS)
+                    .execute(pool)
+                    .await?;
+                sqlx::query("DELETE FROM heart_rate_rollups WHERE bucket_ms < ?")
+                    .bind(current_ms - ROLLUP_TTL_MS)
+                    .execute(pool)
+                    .await?;
+            }
+            DbPool::Postgres(pool) => {
+                sqlx::query("DELETE FROM heart_rate_samples WHERE t_ms < $1")
+                    .bind(current_ms - RAW_SAMPLE_TTL_MS)
+                    .execute(pool)
+                    .await?;
+                sqlx::query("DELETE FROM heart_rate_rollups WHERE bucket_ms < $1")
+                    .bind(current_ms - ROLLUP_TTL_MS)
+                    .execute(pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -981,12 +1103,14 @@ impl Db {
             sqlx::query(
                 r#"
                 INSERT INTO heart_rate_rollups (
-                    collector_id, bucket_ms, sample_count, bpm_sum, min_bpm, max_bpm, first_t_ms, last_t_ms
+                    collector_id, bucket_ms, sample_count, bpm_sum, bpm_sum_sq,
+                    min_bpm, max_bpm, first_t_ms, last_t_ms
                 )
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
                     sample_count = sample_count + 1,
                     bpm_sum = bpm_sum + excluded.bpm_sum,
+                    bpm_sum_sq = bpm_sum_sq + excluded.bpm_sum_sq,
                     min_bpm = MIN(min_bpm, excluded.min_bpm),
                     max_bpm = MAX(max_bpm, excluded.max_bpm),
                     first_t_ms = MIN(first_t_ms, excluded.first_t_ms),
@@ -996,6 +1120,7 @@ impl Db {
             .bind(&collector.collector_id)
             .bind(bucket_ms)
             .bind(sample.bpm as i64)
+            .bind(sample.bpm as i64 * sample.bpm as i64)
             .bind(sample.bpm)
             .bind(sample.bpm)
             .bind(sample.t_ms)
@@ -1083,12 +1208,14 @@ impl Db {
             sqlx::query(
                 r#"
                 INSERT INTO heart_rate_rollups (
-                    collector_id, bucket_ms, sample_count, bpm_sum, min_bpm, max_bpm, first_t_ms, last_t_ms
+                    collector_id, bucket_ms, sample_count, bpm_sum, bpm_sum_sq,
+                    min_bpm, max_bpm, first_t_ms, last_t_ms
                 )
-                VALUES ($1, $2, 1, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT(collector_id, bucket_ms) DO UPDATE SET
                     sample_count = heart_rate_rollups.sample_count + 1,
                     bpm_sum = heart_rate_rollups.bpm_sum + excluded.bpm_sum,
+                    bpm_sum_sq = heart_rate_rollups.bpm_sum_sq + excluded.bpm_sum_sq,
                     min_bpm = LEAST(heart_rate_rollups.min_bpm, excluded.min_bpm),
                     max_bpm = GREATEST(heart_rate_rollups.max_bpm, excluded.max_bpm),
                     first_t_ms = LEAST(heart_rate_rollups.first_t_ms, excluded.first_t_ms),
@@ -1098,6 +1225,7 @@ impl Db {
             .bind(&collector.collector_id)
             .bind(bucket_ms)
             .bind(sample.bpm as i64)
+            .bind(sample.bpm as i64 * sample.bpm as i64)
             .bind(sample.bpm)
             .bind(sample.bpm)
             .bind(sample.t_ms)
@@ -1167,6 +1295,7 @@ async fn app_with_database(database_url: &str) -> anyhow::Result<Router> {
         .load_store(current_ms - MEMORY_SERIES_TTL_MS, current_ms)
         .await?;
     let (events, _) = broadcast::channel(256);
+    start_retention_sweeper(db.clone());
     let state = AppState {
         inner: Arc::new(RwLock::new(store)),
         events,
@@ -1209,15 +1338,13 @@ fn web_dir() -> PathBuf {
         }
     }
 
-    let production =
-        PathBuf::from("clients/heartwith-compose/build/kotlin-webpack/wasmJs/productionExecutable");
+    let production = PathBuf::from("clients/heartwith-web/build/dist/wasmJs/productionExecutable");
     if production.exists() {
         return production;
     }
 
-    let development = PathBuf::from(
-        "clients/heartwith-compose/build/kotlin-webpack/wasmJs/developmentExecutable",
-    );
+    let development =
+        PathBuf::from("clients/heartwith-web/build/kotlin-webpack/wasmJs/developmentExecutable");
     if development.exists() {
         return development;
     }
@@ -1750,6 +1877,35 @@ fn rollup_bucket(t_ms: i64) -> i64 {
     t_ms.div_euclid(ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
 }
 
+fn start_retention_sweeper(db: Db) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(RETENTION_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = db.prune_expired(now_ms()).await {
+                tracing::warn!(?error, "retention sweep failed");
+            }
+        }
+    });
+}
+
+fn ignore_duplicate_column(
+    result: Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let message = error.to_string().to_ascii_lowercase();
+            if message.contains("duplicate column") {
+                Ok(())
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ApiError {
     BadRequest(&'static str),
@@ -2200,6 +2356,73 @@ mod tests {
         let series: SeriesResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(series.samples.len(), 2);
         assert_eq!(series.samples[1].bpm, 82);
+    }
+
+    #[tokio::test]
+    async fn startup_backfills_rollups_before_pruning_expired_raw_samples() {
+        let (app, database_url) = test_app_with_url().await;
+        let session = create_test_session(app.clone()).await;
+        drop(app);
+
+        let old_ms = now_ms() - 25 * 60 * 60_000;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO heart_rate_samples (collector_id, t_ms, bpm, seq, received_at_ms)
+            VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&session.collector_id)
+        .bind(old_ms)
+        .bind(90)
+        .bind(9001_i64)
+        .bind(old_ms)
+        .bind(&session.collector_id)
+        .bind(old_ms + 1_000)
+        .bind(100)
+        .bind(9001_i64)
+        .bind(old_ms + 1_000)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let restarted = app_with_database(&database_url).await.unwrap();
+        drop(restarted);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let raw_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM heart_rate_samples WHERE collector_id = ?")
+                .bind(&session.collector_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(raw_count, 0);
+
+        let rollup = sqlx::query(
+            r#"
+            SELECT sample_count, bpm_sum, bpm_sum_sq, min_bpm, max_bpm
+            FROM heart_rate_rollups
+            WHERE collector_id = ?
+            "#,
+        )
+        .bind(&session.collector_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rollup.get::<i64, _>("sample_count"), 2);
+        assert_eq!(rollup.get::<i64, _>("bpm_sum"), 190);
+        assert_eq!(rollup.get::<i64, _>("bpm_sum_sq"), 18_100);
+        assert_eq!(rollup.get::<i32, _>("min_bpm"), 90);
+        assert_eq!(rollup.get::<i32, _>("max_bpm"), 100);
     }
 
     #[test]

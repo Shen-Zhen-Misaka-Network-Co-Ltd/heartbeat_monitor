@@ -349,7 +349,7 @@ private val heartwithCjkFont = FontResource(
     items = setOf(
         ResourceItem(
             qualifiers = setOf(),
-            path = "composeResources/heartwith.heartwith_compose.generated.resources/font/HeartwithCJK.ttf",
+            path = "composeResources/heartwith.heartwith_web.generated.resources/font/HeartwithCJK.ttf",
             offset = -1,
             size = -1,
         ),
