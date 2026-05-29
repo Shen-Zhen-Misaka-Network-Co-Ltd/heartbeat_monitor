@@ -119,15 +119,25 @@ write_readme "${web_dir}" "Heartwith Web" \
 "Kotlin/Wasm Compose web lobby. Build with: ./gradlew :heartwith-web:wasmJsBrowserDistribution"
 init_repo "${web_dir}"
 
-android_dir="$(prepare_repo_dir heartwith-android)"
+uploader_dir="$(prepare_repo_dir heartwith-android-uploader)"
+copy_common_gradle "${uploader_dir}"
+mkdir -p "${uploader_dir}/clients"
+rsync -a "${ROOT_DIR}/clients/heartwith-android-uploader" "${uploader_dir}/clients/"
+write_gradle_settings "${uploader_dir}" "heartwith-android-uploader" \
+  "heartwith-android-uploader:clients/heartwith-android-uploader"
+write_readme "${uploader_dir}" "Heartwith Android Uploader" \
+"Small Android upload SDK shared by Heartwith collectors. It owns session creation, CBOR batch upload, retry/backoff, offline cache, and injectable HTTP transport for BLE and LSPosed/NPatch clients."
+init_repo "${uploader_dir}"
+
+android_dir="$(prepare_repo_dir heartwith-ble-collector)"
 copy_common_gradle "${android_dir}"
 mkdir -p "${android_dir}/clients"
 rsync -a "${ROOT_DIR}/clients/heartwith-compose" "${android_dir}/clients/"
 rsync -a "${ROOT_DIR}/clients/heartwith-shared" "${android_dir}/clients/"
-write_gradle_settings "${android_dir}" "heartwith-android" \
+write_gradle_settings "${android_dir}" "heartwith-ble-collector" \
   "heartwith-compose:clients/heartwith-compose"
-write_readme "${android_dir}" "Heartwith Android" \
-"Native BLE collector Android app. Build with: ./gradlew :heartwith-compose:assembleRelease"
+write_readme "${android_dir}" "Heartwith BLE Collector" \
+"Native BLE collector Android app. Build with: ./gradlew :heartwith-compose:assembleRelease. This repository will depend on heartwith-android-uploader for shared upload logic."
 init_repo "${android_dir}"
 
 mihealth_dir="$(prepare_repo_dir heartwith-mihealth-module)"
@@ -140,7 +150,7 @@ write_gradle_settings "${mihealth_dir}" "heartwith-mihealth-module" \
   "heartwith-mihealth-lsp:clients/heartwith-mihealth-lsp" \
   "xposed-api-stub:clients/xposed-api-stub"
 write_readme "${mihealth_dir}" "Heartwith MiHealth Module" \
-"LSPosed/NPatch module for Xiaomi Health heart-rate collection. Build with: ./gradlew :heartwith-mihealth-lsp:assembleRelease"
+"LSPosed/NPatch module for Xiaomi Health heart-rate collection. Build with: ./gradlew :heartwith-mihealth-lsp:assembleRelease. This repository keeps MiHealth-specific hook and cleartext adaptation code while sharing upload protocol through heartwith-android-uploader."
 init_repo "${mihealth_dir}"
 
 printf 'Split repositories exported to %s\n' "${OUT_DIR}"

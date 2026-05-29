@@ -15,6 +15,8 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "heartwith"
+include(":heartwith-android-uploader")
+project(":heartwith-android-uploader").projectDir = file("clients/heartwith-android-uploader")
 include(":heartwith-compose")
 project(":heartwith-compose").projectDir = file("clients/heartwith-compose")
 include(":heartwith-web")
