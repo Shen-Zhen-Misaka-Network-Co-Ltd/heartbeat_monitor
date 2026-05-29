@@ -54,3 +54,14 @@ dependencies {
     compileOnly("io.github.libxposed:api:101.0.0")
     compileOnly(project(":xposed-api-stub"))
 }
+
+afterEvaluate {
+    tasks.named("assembleRelease") {
+        doLast {
+            val releaseDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+            val source = releaseDir.resolve("heartwith-mihealth-lsp-release.apk")
+            val target = releaseDir.resolve("Heartwith-MiHealth-LSP-v$heartwithVersionName-$heartwithVersionCode-release.apk")
+            if (source.exists()) source.copyTo(target, overwrite = true)
+        }
+    }
+}
